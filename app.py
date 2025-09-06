@@ -52,19 +52,15 @@ def parse_from_filename(filename: str):
     def clean(s):
         return (s or "").strip()
 
-    # géneros (pueden venir varios con "_")
     graw = clean(parts[0] if len(parts) > 0 else "")
     genres = [t for t in re.sub(r"^GENERO_", "", graw, flags=re.I).split("_") if t]
 
-    # general (también permitimos varios)
     gr = clean(parts[1] if len(parts) > 1 else "")
     generals = [t for t in gr.split("_") if t]
 
-    # específicos (lista)
     sp = clean(parts[2] if len(parts) > 2 else "")
     specifics = [t for t in sp.split("_") if t]
 
-    # título + KEY
     tail = "_X_".join(parts[3:]) if len(parts) > 3 else ""
     title = re.sub(r"_KEY_.+", "", tail).replace("_", " ").strip() or base
     mkey = re.search(r"_KEY_([^_]+)_?", tail, flags=re.I)
@@ -130,15 +126,15 @@ class TagChip(QtWidgets.QFrame):
         }[tone]
         self.setStyleSheet(colors + " border-radius:10px;")
         self.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        self.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
 
-        self.setObjectName("TagChip")
         lay = QtWidgets.QHBoxLayout(self)
         lay.setContentsMargins(8,2,8,2); lay.setSpacing(6)
 
         self.lab = QtWidgets.QLabel(text); self.lab.setStyleSheet("border:none;")
         lay.addWidget(self.lab)
 
-        # Botones ocultos (aparecen al hover)
+        # Botones hover (+ / -)
         self.btnPlus = QtWidgets.QToolButton(); self.btnPlus.setText("＋")
         self.btnPlus.setStyleSheet("QToolButton{background:#14532d;color:#ecfdf5;border:1px solid #166534;border-radius:6px;padding:0 4px;}")
         self.btnPlus.setVisible(False); self.btnPlus.clicked.connect(lambda: self.includeRequested.emit(self.raw_text))
@@ -168,7 +164,6 @@ class TagChip(QtWidgets.QFrame):
 
 class SelectedChip(QtWidgets.QWidget):
     removed = QtCore.Signal(str)
-
     def __init__(self, text: str, negate=False, parent=None):
         super().__init__(parent)
         self.tag = text
@@ -192,18 +187,13 @@ class WaveWidget(QtWidgets.QWidget):
         self._peaks = peaks or []
         self._progress = 0.0
         self.setMinimumHeight(42)
-        self.setMinimumWidth(60)  # para no desaparecer en ventanas estrechas
+        self.setMinimumWidth(24)  # se puede comprimir MUCHO
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setStyleSheet("background: transparent;")
-        self.setSizePolicy(QtWidgets.QSizePolicy.MinimumExpanding, QtWidgets.QSizePolicy.Fixed)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
 
-    def setPeaks(self, peaks):
-        self._peaks = peaks or []
-        self.update()
-
-    def setProgress(self, p):
-        self._progress = max(0.0, min(1.0, p))
-        self.update()
+    def setPeaks(self, peaks): self._peaks = peaks or []; self.update()
+    def setProgress(self, p): self._progress = max(0.0, min(1.0, p)); self.update()
 
     def paintEvent(self, e):
         p = QtGui.QPainter(self)
@@ -216,14 +206,12 @@ class WaveWidget(QtWidgets.QWidget):
         cutoff = int(bars * self._progress)
         p.setPen(QtCore.Qt.NoPen)
 
-        # reproducido (claro)
         p.setBrush(QtGui.QColor("#ffffff"))
         for i in range(min(cutoff, bars)):
             pk = self._peaks[i] if i < len(self._peaks) else 0
             bh = max(1, int(pk * h * 0.95)); y = int(mid - bh / 2)
             p.drawRect(QtCore.QRect(int(i * (w / bars)), y, int(barW * 0.9), bh))
 
-        # resto (gris)
         p.setBrush(QtGui.QColor("#a1a1aa"))
         for i in range(cutoff, bars):
             pk = self._peaks[i] if i < len(self._peaks) else 0
@@ -251,7 +239,7 @@ class SampleRow(QtWidgets.QFrame):
         self.btnPlay.clicked.connect(lambda: self.playClicked.emit(self))
         self.btnPlay.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
 
-        # TAGS (mismo fondo que fila)
+        # TAGS
         chipsL = QtWidgets.QHBoxLayout(); chipsL.setContentsMargins(0,0,0,0); chipsL.setSpacing(6)
         for g in info["genres"]:
             c = TagChip(g, "blue");   c.includeRequested.connect(self.tagInclude); c.excludeRequested.connect(self.tagExclude); chipsL.addWidget(c)
@@ -263,22 +251,24 @@ class SampleRow(QtWidgets.QFrame):
         chipsW = QtWidgets.QWidget(); chipsW.setStyleSheet("background:transparent;")
         ch = QtWidgets.QHBoxLayout(chipsW); ch.setContentsMargins(0,0,0,0); ch.setSpacing(6); ch.addLayout(chipsL); ch.addStretch(1)
 
-        # NOMBRE (elide)
+        # NOMBRE
         self.nameLbl = QtWidgets.QLabel(info["title"]); self.nameLbl.setStyleSheet("color:#e5e7eb;")
         self.nameLbl.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
         # STAR
-        self.btnStar = QtWidgets.QToolButton(); self.btnStar.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        self.btnStar = QtWidgets.QToolButton()
+        self.btnStar.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
         self._sync_star_icon()
         self.btnStar.clicked.connect(self._toggle_star)
+        self._update_star_visibility(initial=True)
 
         left = QtWidgets.QHBoxLayout(); left.setContentsMargins(0,0,0,0); left.setSpacing(8)
         left.addWidget(chipsW); left.addWidget(self.nameLbl, 1); left.addWidget(self.btnStar)
         leftW = QtWidgets.QWidget(); leftW.setStyleSheet("background:transparent;"); leftW.setLayout(left)
 
-        # WAVE (no desaparece al achicar)
+        # WAVE
         self.wave = WaveWidget(info.get("peaks"))
-        self.wave.setSizePolicy(QtWidgets.QSizePolicy.MinimumExpanding, QtWidgets.QSizePolicy.Fixed)
+        self.wave.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
 
         grid = QtWidgets.QGridLayout(self)
         grid.setContentsMargins(10,10,10,10)
@@ -286,11 +276,20 @@ class SampleRow(QtWidgets.QFrame):
         grid.addWidget(self.btnPlay, 0, 0)
         grid.addWidget(leftW, 0, 1)
         grid.addWidget(self.wave, 0, 2)
-        grid.setColumnStretch(1, 1)   # nombre/tags ocupa el resto
-        grid.setColumnStretch(2, 1)
+        grid.setColumnStretch(1, 1)     # nombre/tags crecen
+        grid.setColumnStretch(2, 0)     # wave acepta comprimirse al mínimo
 
-        # drag externo
-        self.setMouseTracking(True); self._drag_start = None
+        # hover para estrella
+        self.setMouseTracking(True)
+
+    # hover para mostrar/ocultar ☆ si no es favorito
+    def enterEvent(self, e):
+        self._update_star_visibility(show_hover=True)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._update_star_visibility(show_hover=False)
+        super().leaveEvent(e)
 
     def _apply_style(self):
         if self.isPlaying:
@@ -302,9 +301,17 @@ class SampleRow(QtWidgets.QFrame):
         self.btnStar.setText("★" if self.isFav else "☆")
         self.btnStar.setToolTip("Quitar de favoritos" if self.isFav else "Marcar como favorito")
 
+    def _update_star_visibility(self, show_hover=False, initial=False):
+        if self.isFav:
+            self.btnStar.setVisible(True)   # ★ siempre visible
+        else:
+            # ☆ visible solo en hover sobre la fila
+            self.btnStar.setVisible(bool(show_hover or initial is True and False))
+
     def _toggle_star(self):
         self.isFav = not self.isFav
         self._sync_star_icon()
+        self._update_star_visibility(show_hover=True)
         self.starToggled.emit(self)
 
     def setPlaying(self, v: bool):
@@ -312,20 +319,6 @@ class SampleRow(QtWidgets.QFrame):
 
     def setProgress(self, p): self.wave.setProgress(p)
     def setPeaks(self, peaks): self.wave.setPeaks(peaks)
-
-    # drag
-    def mousePressEvent(self, e: QtGui.QMouseEvent):
-        if e.button() == QtCore.Qt.LeftButton:
-            self._drag_start = e.position().toPoint()
-        super().mousePressEvent(e)
-
-    def mouseMoveEvent(self, e: QtGui.QMouseEvent):
-        if self._drag_start is None: return super().mouseMoveEvent(e)
-        if (e.position().toPoint() - self._drag_start).manhattanLength() < 8: return
-        drag = QtGui.QDrag(self); mime = QtCore.QMimeData()
-        mime.setUrls([QtCore.QUrl.fromLocalFile(str(self.info["path"]))])
-        drag.setMimeData(mime); drag.exec(QtCore.Qt.CopyAction); self._drag_start = None
-        super().mouseMoveEvent(e)
 
 # ----------------- fila de sugeridos -----------------
 class TagRow(QtWidgets.QWidget):
@@ -337,17 +330,20 @@ class TagRow(QtWidgets.QWidget):
         self._tags = []           # [(tag, count)]
         self._ignored = set()
         self._hidden_for_menu = []
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.setMinimumHeight(28)
 
         self.wrap = QtWidgets.QHBoxLayout(self)
         self.wrap.setContentsMargins(0,0,0,0); self.wrap.setSpacing(6)
 
         self.menuBtn = QtWidgets.QToolButton()
         self.menuBtn.setText("…")
+        self.menuBtn.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        self.menuBtn.setMinimumWidth(28)
         self.menuBtn.setStyleSheet("background:#232327;color:#e5e7eb;border:1px solid #3a3a44;border-radius:8px;padding:2px 10px;")
         self.menuBtn.clicked.connect(self._open_menu)
 
     def setData(self, tags_with_count, ignored=set()):
-        # orden por frecuencia desc y alfabético
         self._tags = sorted([t for t in tags_with_count if t[0] not in ignored], key=lambda x: (-x[1], x[0]))
         self._ignored = set(ignored); self._rebuild()
 
@@ -357,19 +353,24 @@ class TagRow(QtWidgets.QWidget):
         while self.wrap.count():
             it = self.wrap.takeAt(0)
             if it.widget(): it.widget().deleteLater()
-        if not self._tags:
-            self.wrap.addStretch(1); self.wrap.addWidget(self.menuBtn); return
 
-        fm = self.fontMetrics(); avail = max(0, self.width() - 60); used = 0; shown = []
+        fm = self.fontMetrics()
+        menu_w = self.menuBtn.sizeHint().width() + 6
+        avail = max(0, self.width() - menu_w)
+        used = 0; shown = []
+
         for tag, cnt in self._tags:
-            chip_width = fm.horizontalAdvance(tag) + 22 + 26  # texto + padding + botones hover aprox
-            if used + chip_width > avail: break
+            chip_width = fm.horizontalAdvance(tag) + 22 + 26  # texto + padding + botones hover
+            if used + chip_width > avail:
+                break
             btn = TagChip(tag, "gray")
             btn.setToolTip(f"{cnt} coincidencias · Clic: incluir · Der: excluir")
             btn.includeRequested.connect(self.includeRequested.emit)
             btn.excludeRequested.connect(self.excludeRequested.emit)
             self.wrap.addWidget(btn); used += chip_width + 6; shown.append(tag)
-        self.wrap.addStretch(1); self.wrap.addWidget(self.menuBtn)
+
+        self.wrap.addStretch(1)
+        self.wrap.addWidget(self.menuBtn)
         self._hidden_for_menu = [t for t, _ in self._tags if t not in shown]
 
     def _open_menu(self):
@@ -412,13 +413,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._load_samples()
         self._apply_filters()
         self._refresh_tag_suggestions()
+        QtCore.QTimer.singleShot(0, self._refresh_tag_suggestions)  # asegura tags al primer show
 
         # teclado
         self._current_row = None
         self.installEventFilter(self)
-
-        # asegúrate de que la TagRow se dibuje también al primer show
-        QtCore.QTimer.singleShot(0, self._refresh_tag_suggestions)
 
     # ---------- UI ----------
     def _build_ui(self):
@@ -440,12 +439,13 @@ class MainWindow(QtWidgets.QMainWindow):
         act_change = options.addAction("Cambiar carpeta de &samples…")
         act_change.triggered.connect(self.change_folder)
 
-        # botón DONAR a la derecha
+        # botón DONAR a la derecha del menubar
         donate_btn = QtWidgets.QPushButton("Donar")
         donate_btn.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
-        donate_btn.setStyleSheet("QPushButton{background:#16a34a;color:white;border:1px solid #15803d;border-radius:8px;padding:4px 10px;} QPushButton:hover{background:#22c55e;}")
+        donate_btn.setStyleSheet("QPushButton{background:#16a34a;color:white;border:1px solid #15803d;border-radius:8px;padding:3px 10px;} QPushButton:hover{background:#22c55e;}")
         donate_btn.clicked.connect(lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl("https://www.gabrielgolker.com")))
         menubar.setCornerWidget(donate_btn, QtCore.Qt.TopRightCorner)
+        QtCore.QTimer.singleShot(0, lambda: donate_btn.setFixedHeight(menubar.height()-2))
 
         # buscador
         self.search = QtWidgets.QLineEdit()
@@ -585,7 +585,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resLbl.setText(f"{visible_count} resultado" + ("" if visible_count == 1 else "s"))
 
     def _refresh_tag_suggestions(self):
-        # frecuencia de tags SOLO sobre lo visible
         freq = Counter()
         for i, row in enumerate(self.rows):
             if not row.isVisible(): continue
@@ -598,22 +597,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- reproducción / navegación ----------
     def _toggle_play_row(self, row: SampleRow):
-        # si es el actual:
         if self._current_row is row:
             st = self.player.playbackState()
             if st == QtMultimedia.QMediaPlayer.PlayingState:
-                self.player.pause(); row.setPlaying(False)  # pausa
+                self.player.pause(); row.setPlaying(False)
             elif st == QtMultimedia.QMediaPlayer.PausedState:
-                self.player.play(); row.setPlaying(True)    # reanuda
-            else:  # StoppedState -> volver a 0 y play
+                self.player.play(); row.setPlaying(True)
+            else:
                 self.player.setPosition(0); self.player.play(); row.setPlaying(True)
             return
 
-        # parar el que estuviera
         if self._current_row:
             self._current_row.setPlaying(False)
 
-        # preparar y sonar
         url = QtCore.QUrl.fromLocalFile(str(row.info["path"]))
         self.player.setSource(url)
         self.player.setPosition(0)
@@ -630,7 +626,6 @@ class MainWindow(QtWidgets.QMainWindow):
             idx = visible_rows.index(self._current_row)
             idx = max(0, min(len(visible_rows)-1, idx + delta))
             target = visible_rows[idx]
-        # si está reproduciendo, pausar y pasar al target
         if self.player.playbackState() == QtMultimedia.QMediaPlayer.PlayingState and self._current_row:
             self.player.pause()
             self._current_row.setPlaying(False)
@@ -650,26 +645,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_row.setProgress(p)
 
     def _on_status(self, status):
-        # al terminar, queda seleccionado y listo para replay
         if status == QtMultimedia.QMediaPlayer.EndOfMedia and self._current_row:
             self._current_row.setPlaying(False)
             self._current_row.setProgress(0.0)
-            self.player.setPosition(0)
+            self.player.setPosition(0)  # queda seleccionado para replay
 
     # ---------- teclado ----------
     def eventFilter(self, obj, ev):
         if ev.type() == QtCore.QEvent.KeyPress:
             key = ev.key()
             if key == QtCore.Qt.Key_Space:
-                if self._current_row is None:
-                    # reproduce el primero visible
-                    vis = [r for r in self.rows if r.isVisible()]
-                    if vis: self._toggle_play_row(vis[0])
-                else:
+                vis = [r for r in self.rows if r.isVisible()]
+                if self._current_row is None and vis:
+                    self._toggle_play_row(vis[0])
+                elif self._current_row:
                     self._toggle_play_row(self._current_row)
                 return True
             if key in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return):
-                target = self._current_row or ( [r for r in self.rows if r.isVisible()] or [None] )[0]
+                vis = [r for r in self.rows if r.isVisible()]
+                target = self._current_row or (vis[0] if vis else None)
                 if target: self._toggle_play_row(target)
                 return True
             if key == QtCore.Qt.Key_Down:
@@ -687,7 +681,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if dlg.exec():
             self.samples_dir = Path(dlg.selectedFiles()[0])
             cfg = load_config(); cfg["samples_dir"] = str(self.samples_dir); save_config(cfg)
-            # recargar
             while self.listLayout.count():
                 it = self.listLayout.takeAt(0)
                 if it.widget(): it.widget().deleteLater()
@@ -737,7 +730,6 @@ class WelcomeDialog(QtWidgets.QDialog):
 def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName(APP_NAME); app.setOrganizationName(APP_ORG)
-    # qdarkstyle + override del fondo
     app.setStyleSheet(qdarkstyle.load_stylesheet(qt_api="pyside6") + "\nQWidget{background-color:#121214;}")
 
     cfg = load_config()
@@ -757,9 +749,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
 
 
 
