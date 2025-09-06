@@ -33,7 +33,7 @@ def save_config(cfg):
 
 def parse_from_filename(filename: str):
     """
-    Formato ejemplo:
+    Ejemplo:
     GENERO_trap_X_drums_X_clap_snare_X_SQUISH_KEY_NO_.wav
     -> genre=trap, general=drums, specifics=['clap','snare'], title='SQUISH', key='—'
     """
@@ -50,16 +50,15 @@ def parse_from_filename(filename: str):
         specifics = [t for t in re.split(r"[_\-]", parts[2]) if t]
     tail = "_X_".join(parts[3:]) if len(parts) > 3 else ""
     mkey = re.search(r"_KEY_([^_]+)_?", tail, flags=re.I)
-    key = (mkey.group(1).upper() if mkey else "").strip() or "—"
-    if key == "NO":
-        key = "—"
+    key = (mkey and mkey.group(1).upper()) or ""
+    key = "—" if (not key or key == "NO") else key
     title = re.sub(r"_KEY_.+", "", tail).replace("_", " ").strip() or base
     return dict(genre=genre, general=general, specifics=specifics, title=title, key=key)
 
 def read_pcm_waveform(path: Path, peaks=WAVE_PEAKS):
     """
-    Onda rápida para WAV PCM (sin dependencias extra).
-    Para MP3/FLAC/OGG devolvemos None (se mostrará una línea base).
+    Onda rápida para WAV PCM (sin deps extra).
+    Para MP3/FLAC/OGG -> devuelve None (se dibuja una línea base).
     """
     try:
         if path.suffix.lower() not in {".wav"}:
@@ -80,7 +79,7 @@ def read_pcm_waveform(path: Path, peaks=WAVE_PEAKS):
                 wf.setpos(min(i * step, n_frames - 1))
                 frames = wf.readframes(min(step, n_frames - i * step))
                 fmt_char = {1:"b", 2:"h", 3:None, 4:"i"}[sampwidth]
-                if fmt_char is None:  # 24-bit (aprox)
+                if fmt_char is None:  # 24-bit aprox
                     samples = []
                     for j in range(0, len(frames), 3 * n_channels):
                         chunk = frames[j:j+3]
@@ -152,8 +151,7 @@ class TagChip(QtWidgets.QLabel):
         self.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
 
 class SampleRow(QtWidgets.QWidget):
-    playRequested = QtCore.Signal(object)  # self
-
+    playRequested = QtCore.Signal(object)
     def __init__(self, info, parent=None):
         super().__init__(parent)
         self.info = info
@@ -167,24 +165,19 @@ class SampleRow(QtWidgets.QWidget):
         if info["genre"]:   chips.append(TagChip(info["genre"], "blue"))
         if info["general"]: chips.append(TagChip(info["general"], "indigo"))
         for t in info["specifics"]: chips.append(TagChip(t, "green"))
-
-        self.tagsW = QtWidgets.QWidget()
-        h = QtWidgets.QHBoxLayout(self.tagsW)
-        h.setContentsMargins(0,0,0,0); h.setSpacing(6)
+        tagsW = QtWidgets.QWidget()
+        h = QtWidgets.QHBoxLayout(tagsW); h.setContentsMargins(0,0,0,0); h.setSpacing(6)
         for c in chips: h.addWidget(c)
 
-        self.nameLbl = QtWidgets.QLabel(info["title"])
-        self.nameLbl.setStyleSheet("color:#e5e7eb;")
-        self.nameLbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        name = QtWidgets.QLabel(info["title"]); name.setStyleSheet("color:#e5e7eb;")
+        name.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
 
-        rowLeft = QtWidgets.QHBoxLayout()
-        rowLeft.setContentsMargins(0,0,0,0); rowLeft.setSpacing(8)
-        rowLeft.addWidget(self.tagsW); rowLeft.addWidget(self.nameLbl, 1)
-        tagsWrap = QtWidgets.QWidget(); tagsWrap.setLayout(rowLeft)
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(0,0,0,0); row.setSpacing(8)
+        row.addWidget(tagsW); row.addWidget(name, 1)
+        tagsWrap = QtWidgets.QWidget(); tagsWrap.setLayout(row)
 
-        self.keyLbl = QtWidgets.QLabel(info["key"] or "—")
-        self.keyLbl.setAlignment(QtCore.Qt.AlignCenter)
-
+        self.keyLbl = QtWidgets.QLabel(info["key"] or "—"); self.keyLbl.setAlignment(QtCore.Qt.AlignCenter)
         self.wave = WaveWidget(info.get("peaks"))
 
         grid = QtWidgets.QGridLayout(self)
@@ -197,48 +190,51 @@ class SampleRow(QtWidgets.QWidget):
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
 
-    def setPlaying(self, v):
-        self.isPlaying = v
-        self.btn.setText("■" if v else "▶")
-
-    def setPeaks(self, peaks):
-        self.wave.setPeaks(peaks)
+    def setPlaying(self, v): self.isPlaying = v; self.btn.setText("■" if v else "▶")
+    def setPeaks(self, peaks): self.wave.setPeaks(peaks)
 
 
-# ----------------- WIZARD de primer arranque -----------------
-class WelcomePage(QtWidgets.QWizardPage):
-    def __init__(self):
-        super().__init__()
-        self.setTitle("Bienvenido al instalador de Lup Shots")
-        self.setSubTitle("Este asistente te ayudará a configurar la carpeta donde están o estarán tus shots.")
-        info = QtWidgets.QLabel(
-            "• Puedes dejar la ruta por defecto (Música → Lup Samples).\n"
-            "• Siempre podrás cambiarla luego desde el menú Archivo → Cambiar carpeta de samples."
-        )
-        info.setWordWrap(True)
-        lay = QtWidgets.QVBoxLayout(self)
-        lay.addWidget(info)
-        lay.addStretch(1)
+# ----------------- Bienvenida de primer arranque (1 sola ventana) -----------------
+class WelcomeDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Bienvenido a Lup Shots")
+        self.setModal(True)
+        self.setMinimumWidth(520)
 
-class FolderPage(QtWidgets.QWizardPage):
-    def __init__(self):
-        super().__init__()
-        self.setTitle("Selecciona la ubicación de tus shots")
-        self.setSubTitle("Elige dónde están (o dónde pondrás) tus samples. Se guardará en la configuración del usuario.")
-        self.pathEdit = QtWidgets.QLineEdit()
-        self.pathEdit.setText(str(default_samples_dir()))
+        title = QtWidgets.QLabel("<b>Bienvenido a Lup Shots</b>")
+        sub   = QtWidgets.QLabel("Selecciona la carpeta donde están (o pondrás) tus shots.")
+        sub.setWordWrap(True)
+
+        self.pathEdit = QtWidgets.QLineEdit(str(default_samples_dir()))
         browse = QtWidgets.QPushButton("Examinar…")
         browse.clicked.connect(self._browse)
+
         row = QtWidgets.QHBoxLayout()
         row.addWidget(self.pathEdit, 1)
         row.addWidget(browse)
 
-        form = QtWidgets.QFormLayout()
-        form.addRow("Carpeta de samples:", row)
+        useBtn = QtWidgets.QPushButton("Usar esta carpeta")
+        useBtn.setDefault(True)
+        cancel = QtWidgets.QPushButton("Cancelar")
+        useBtn.clicked.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+
+        btns = QtWidgets.QHBoxLayout()
+        btns.addStretch(1)
+        btns.addWidget(cancel)
+        btns.addWidget(useBtn)
+
+        footer = QtWidgets.QLabel("© 2025 Gabriel Golker")
+        footer.setAlignment(QtCore.Qt.AlignHCenter)
+        footer.setStyleSheet("color:#9ca3af; padding-top:8px;")
 
         lay = QtWidgets.QVBoxLayout(self)
-        lay.addLayout(form)
-        lay.addStretch(1)
+        lay.addWidget(title)
+        lay.addWidget(sub)
+        lay.addLayout(row)
+        lay.addLayout(btns)
+        lay.addWidget(footer)
 
     def _browse(self):
         dlg = QtWidgets.QFileDialog(self, "Seleccionar carpeta de samples")
@@ -248,44 +244,11 @@ class FolderPage(QtWidgets.QWizardPage):
         if dlg.exec():
             self.pathEdit.setText(dlg.selectedFiles()[0])
 
-    def samples_path(self) -> Path:
+    def selected_path(self) -> Path:
         return Path(self.pathEdit.text().strip() or str(default_samples_dir()))
 
-class SetupWizard(QtWidgets.QWizard):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Lup Shots - Configuración inicial")
-        self.setWizardStyle(QtWidgets.QWizard.ModernStyle)
-        self.setOption(QtWidgets.QWizard.NoBackButtonOnStartPage, True)
-        self.welcome = WelcomePage()
-        self.folder  = FolderPage()
-        self.addPage(self.welcome)
-        self.addPage(self.folder)
 
-        # Pie de página centrado
-        self.footer = QtWidgets.QLabel("© 2025 Gabriel Golker", self)
-        self.footer.setAlignment(QtCore.Qt.AlignHCenter)
-        self.footer.setStyleSheet("color:#9ca3af;")
-        # Insertar en layout de wizard
-        lay = QtWidgets.QVBoxLayout()
-        # metemos el layout original dentro de un contenedor
-        central = self.findChild(QtWidgets.QWidget, "qt_wizard_container") or self
-        base = QtWidgets.QVBoxLayout()
-        for i in reversed(range(self.layout().count())):
-            item = self.layout().takeAt(i)
-            if item.widget():
-                base.addWidget(item.widget())
-            elif item.layout():
-                base.addLayout(item.layout())
-        lay.addLayout(base, 1)
-        lay.addWidget(self.footer)
-        self.setLayout(lay)
-
-    def selected_samples_dir(self) -> Path:
-        return self.folder.samples_path()
-
-
-# ----------------- Main Window -----------------
+# ----------------- Ventana principal -----------------
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, samples_dir: Path):
         super().__init__()
@@ -315,22 +278,22 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction("Salir").triggered.connect(self.close)
 
-        # buscador
+        # Buscador
         self.search = QtWidgets.QLineEdit()
         self.search.setPlaceholderText("Buscar (tags, nombre o key)…")
         v.addWidget(self.search)
 
-        # encabezado
+        # Encabezado
         head = QtWidgets.QGridLayout()
         head.setHorizontalSpacing(10)
         head.addWidget(self._muted(""), 0, 0)
         head.addWidget(self._muted("Etiquetas & Nombre"), 0, 1)
         head.addWidget(self._muted("Key"), 0, 2)
         head.addWidget(self._muted("Wave"), 0, 3)
-        headW = QtWidgets.QWidget(); headW.setLayout(head)
-        v.addWidget(headW)
+        hw = QtWidgets.QWidget(); hw.setLayout(head)
+        v.addWidget(hw)
 
-        # lista
+        # Lista
         self.scroll = QtWidgets.QScrollArea(); self.scroll.setWidgetResizable(True)
         self.listHost = QtWidgets.QWidget()
         self.listLayout = QtWidgets.QVBoxLayout(self.listHost)
@@ -339,7 +302,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scroll.setWidget(self.listHost)
         v.addWidget(self.scroll, 1)
 
-        # footer app (opcional, también visible)
+        # Footer
         footer = QtWidgets.QLabel("© 2025 Gabriel Golker")
         footer.setAlignment(QtCore.Qt.AlignHCenter)
         footer.setStyleSheet("color:#9ca3af; padding: 8px 0;")
@@ -361,7 +324,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if dlg.exec():
             self.samples_dir = Path(dlg.selectedFiles()[0])
             cfg = load_config(); cfg["samples_dir"] = str(self.samples_dir); save_config(cfg)
-            self._reload_samples()
+            self._reload()
 
     # -------- samples --------
     def _collect_files(self):
@@ -375,8 +338,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _load_samples(self):
         self.rows = []
-        files = self._collect_files()
-        for p in files:
+        for p in self._collect_files():
             meta = parse_from_filename(p.name)
             peaks, duration = read_pcm_waveform(p)
             info = {
@@ -394,7 +356,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.listLayout.addWidget(row)
         self.listLayout.addStretch(1)
 
-    def _reload_samples(self):
+    def _reload(self):
         while self.listLayout.count():
             it = self.listLayout.takeAt(0)
             if it.widget(): it.widget().deleteLater()
@@ -442,19 +404,17 @@ def main():
     cfg = load_config()
     samples_dir = Path(cfg.get("samples_dir", default_samples_dir()))
 
-    # Mostrar wizard si es primer arranque o si la carpeta no existe
-    need_setup = (not CONFIG_PATH.exists()) or (not samples_dir.exists())
-    if need_setup:
-        wiz = SetupWizard()
-        if wiz.exec() == QtWidgets.QDialog.Accepted:
-            chosen = wiz.selected_samples_dir()
+    # Primer arranque o carpeta inexistente → mostrar 1 ventana de bienvenida
+    if (not CONFIG_PATH.exists()) or (not samples_dir.exists()):
+        dlg = WelcomeDialog()
+        if dlg.exec() == QtWidgets.QDialog.Accepted:
+            chosen = dlg.selected_path()
             if not chosen.exists():
                 chosen.mkdir(parents=True, exist_ok=True)
             cfg["samples_dir"] = str(chosen)
             save_config(cfg)
             samples_dir = chosen
         else:
-            # cancelado → salir
             sys.exit(0)
 
     w = MainWindow(samples_dir)
@@ -463,3 +423,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
