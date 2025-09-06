@@ -1,26 +1,20 @@
 # app.py
-import os
-import re
-import sys
-import json
-import wave
-import contextlib
+import os, re, sys, json, wave, contextlib
 from pathlib import Path
-
 from PySide6 import QtCore, QtGui, QtWidgets, QtMultimedia
 import qdarkstyle
 
 APP_NAME = "Lup Shots"
-APP_ORG = "Lup"
-CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME
+APP_ORG  = "Lup"
+VALID_EXTS = {".wav", ".aiff", ".aif", ".mp3", ".flac", ".ogg"}
+WAVE_PEAKS = 140
+
+CONFIG_DIR  = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
-VALID_EXTS = {".wav", ".aiff", ".aif", ".mp3", ".flac", ".ogg"}
-WAVE_PEAKS = 140  # barras mini-waveform
 
-
-# ----------------- utils -----------------
+# ----------------- utilidades -----------------
 def default_samples_dir() -> Path:
     # %USERPROFILE%\Music\Lup Samples
     music = Path(os.path.join(os.environ.get("USERPROFILE", str(Path.home())), "Music"))
@@ -37,21 +31,11 @@ def load_config():
 def save_config(cfg):
     CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def choose_samples_dir(parent, starting: Path) -> Path:
-    dlg = QtWidgets.QFileDialog(parent, "Seleccionar carpeta de samples")
-    dlg.setFileMode(QtWidgets.QFileDialog.Directory)
-    dlg.setOption(QtWidgets.QFileDialog.ShowDirsOnly, True)
-    dlg.setDirectory(str(starting))
-    if dlg.exec():
-        dirs = dlg.selectedFiles()
-        if dirs:
-            return Path(dirs[0])
-    return starting
-
 def parse_from_filename(filename: str):
     """
-    Formato: GENERO_trap_X_drums_X_clap_snare_X_SQUISH_KEY_NO_.wav
-    Devuelve: dict(genre, general, specifics[], title, key)
+    Formato ejemplo:
+    GENERO_trap_X_drums_X_clap_snare_X_SQUISH_KEY_NO_.wav
+    -> genre=trap, general=drums, specifics=['clap','snare'], title='SQUISH', key='—'
     """
     base = re.sub(r"\.[^.]+$", "", filename)
     parts = base.split("_X_")
@@ -65,31 +49,27 @@ def parse_from_filename(filename: str):
     if len(parts) > 2:
         specifics = [t for t in re.split(r"[_\-]", parts[2]) if t]
     tail = "_X_".join(parts[3:]) if len(parts) > 3 else ""
-    key_match = re.search(r"_KEY_([^_]+)_?", tail, flags=re.I)
-    key = (key_match.group(1).upper() if key_match else "").strip() or "—"
+    mkey = re.search(r"_KEY_([^_]+)_?", tail, flags=re.I)
+    key = (mkey.group(1).upper() if mkey else "").strip() or "—"
     if key == "NO":
         key = "—"
     title = re.sub(r"_KEY_.+", "", tail).replace("_", " ").strip() or base
     return dict(genre=genre, general=general, specifics=specifics, title=title, key=key)
 
-def seconds_to_time(s):
-    m = int(s // 60)
-    ss = int(round(s % 60))
-    return f"{m}:{ss:02d}"
-
 def read_pcm_waveform(path: Path, peaks=WAVE_PEAKS):
     """
-    Onda rápida para WAV PCM. Para otros formatos mostramos placeholder.
+    Onda rápida para WAV PCM (sin dependencias extra).
+    Para MP3/FLAC/OGG devolvemos None (se mostrará una línea base).
     """
     try:
         if path.suffix.lower() not in {".wav"}:
             return None, 0.0
         with contextlib.closing(wave.open(str(path), "rb")) as wf:
             n_channels = wf.getnchannels()
-            n_frames = wf.getnframes()
-            framerate = wf.getframerate()
-            sampwidth = wf.getsampwidth()
-            duration = n_frames / float(framerate) if framerate else 0.0
+            n_frames   = wf.getnframes()
+            framerate  = wf.getframerate()
+            sampwidth  = wf.getsampwidth()
+            duration   = n_frames / float(framerate) if framerate else 0.0
 
             blocks = peaks
             step = max(1, n_frames // blocks)
@@ -99,15 +79,14 @@ def read_pcm_waveform(path: Path, peaks=WAVE_PEAKS):
             for i in range(blocks):
                 wf.setpos(min(i * step, n_frames - 1))
                 frames = wf.readframes(min(step, n_frames - i * step))
-                fmt_char = {1: "b", 2: "h", 3: None, 4: "i"}[sampwidth]
+                fmt_char = {1:"b", 2:"h", 3:None, 4:"i"}[sampwidth]
                 if fmt_char is None:  # 24-bit (aprox)
                     samples = []
                     for j in range(0, len(frames), 3 * n_channels):
-                        chunk = frames[j : j + 3]
-                        if len(chunk) < 3:
-                            break
-                        b = int.from_bytes(chunk, byteorder="little", signed=True)
-                        samples.append(b / float(2 ** 23))
+                        chunk = frames[j:j+3]
+                        if len(chunk) < 3: break
+                        b = int.from_bytes(chunk, "little", signed=True)
+                        samples.append(b / float(2**23))
                 else:
                     fmt = "<" + fmt_char * (len(frames) // sampwidth)
                     ints = struct.unpack(fmt, frames)
@@ -116,10 +95,13 @@ def read_pcm_waveform(path: Path, peaks=WAVE_PEAKS):
                 peak = max(abs(min(samples)), max(samples)) if samples else 0.0
                 out.append(peak)
             mx = max(out) if out else 1.0
-            out = [p / (mx or 1.0) for p in out]
-            return out, duration
+            return [p / (mx or 1.0) for p in out], duration
     except Exception:
         return None, 0.0
+
+def seconds_to_time(s):
+    m = int(s // 60); ss = int(round(s % 60))
+    return f"{m}:{ss:02d}"
 
 def norm(s: str) -> str:
     return QtCore.QCollator().sortKey(s.lower())
@@ -182,26 +164,23 @@ class SampleRow(QtWidgets.QWidget):
         self.btn.clicked.connect(lambda: self.playRequested.emit(self))
 
         chips = []
-        if info["genre"]:
-            chips.append(TagChip(info["genre"], "blue"))
-        if info["general"]:
-            chips.append(TagChip(info["general"], "indigo"))
-        for t in info["specifics"]:
-            chips.append(TagChip(t, "green"))
+        if info["genre"]:   chips.append(TagChip(info["genre"], "blue"))
+        if info["general"]: chips.append(TagChip(info["general"], "indigo"))
+        for t in info["specifics"]: chips.append(TagChip(t, "green"))
+
         self.tagsW = QtWidgets.QWidget()
-        h = QtWidgets.QHBoxLayout(self.tagsW); h.setContentsMargins(0,0,0,0); h.setSpacing(6)
+        h = QtWidgets.QHBoxLayout(self.tagsW)
+        h.setContentsMargins(0,0,0,0); h.setSpacing(6)
         for c in chips: h.addWidget(c)
 
         self.nameLbl = QtWidgets.QLabel(info["title"])
         self.nameLbl.setStyleSheet("color:#e5e7eb;")
         self.nameLbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
 
-        tagsLine = QtWidgets.QHBoxLayout()
-        tagsLine.setContentsMargins(0,0,0,0)
-        tagsLine.setSpacing(8)
-        tagsLine.addWidget(self.tagsW)
-        tagsLine.addWidget(self.nameLbl, 1)
-        tagsWrap = QtWidgets.QWidget(); tagsWrap.setLayout(tagsLine)
+        rowLeft = QtWidgets.QHBoxLayout()
+        rowLeft.setContentsMargins(0,0,0,0); rowLeft.setSpacing(8)
+        rowLeft.addWidget(self.tagsW); rowLeft.addWidget(self.nameLbl, 1)
+        tagsWrap = QtWidgets.QWidget(); tagsWrap.setLayout(rowLeft)
 
         self.keyLbl = QtWidgets.QLabel(info["key"] or "—")
         self.keyLbl.setAlignment(QtCore.Qt.AlignCenter)
@@ -218,36 +197,110 @@ class SampleRow(QtWidgets.QWidget):
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
 
-    def setPlaying(self, playing: bool):
-        self.isPlaying = playing
-        self.btn.setText("■" if playing else "▶")
+    def setPlaying(self, v):
+        self.isPlaying = v
+        self.btn.setText("■" if v else "▶")
 
     def setPeaks(self, peaks):
         self.wave.setPeaks(peaks)
 
 
-class MainWindow(QtWidgets.QMainWindow):
+# ----------------- WIZARD de primer arranque -----------------
+class WelcomePage(QtWidgets.QWizardPage):
     def __init__(self):
         super().__init__()
+        self.setTitle("Bienvenido al instalador de Lup Shots")
+        self.setSubTitle("Este asistente te ayudará a configurar la carpeta donde están o estarán tus shots.")
+        info = QtWidgets.QLabel(
+            "• Puedes dejar la ruta por defecto (Música → Lup Samples).\n"
+            "• Siempre podrás cambiarla luego desde el menú Archivo → Cambiar carpeta de samples."
+        )
+        info.setWordWrap(True)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.addWidget(info)
+        lay.addStretch(1)
+
+class FolderPage(QtWidgets.QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle("Selecciona la ubicación de tus shots")
+        self.setSubTitle("Elige dónde están (o dónde pondrás) tus samples. Se guardará en la configuración del usuario.")
+        self.pathEdit = QtWidgets.QLineEdit()
+        self.pathEdit.setText(str(default_samples_dir()))
+        browse = QtWidgets.QPushButton("Examinar…")
+        browse.clicked.connect(self._browse)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.pathEdit, 1)
+        row.addWidget(browse)
+
+        form = QtWidgets.QFormLayout()
+        form.addRow("Carpeta de samples:", row)
+
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.addLayout(form)
+        lay.addStretch(1)
+
+    def _browse(self):
+        dlg = QtWidgets.QFileDialog(self, "Seleccionar carpeta de samples")
+        dlg.setFileMode(QtWidgets.QFileDialog.Directory)
+        dlg.setOption(QtWidgets.QFileDialog.ShowDirsOnly, True)
+        dlg.setDirectory(self.pathEdit.text())
+        if dlg.exec():
+            self.pathEdit.setText(dlg.selectedFiles()[0])
+
+    def samples_path(self) -> Path:
+        return Path(self.pathEdit.text().strip() or str(default_samples_dir()))
+
+class SetupWizard(QtWidgets.QWizard):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Lup Shots - Configuración inicial")
+        self.setWizardStyle(QtWidgets.QWizard.ModernStyle)
+        self.setOption(QtWidgets.QWizard.NoBackButtonOnStartPage, True)
+        self.welcome = WelcomePage()
+        self.folder  = FolderPage()
+        self.addPage(self.welcome)
+        self.addPage(self.folder)
+
+        # Pie de página centrado
+        self.footer = QtWidgets.QLabel("© 2025 Gabriel Golker", self)
+        self.footer.setAlignment(QtCore.Qt.AlignHCenter)
+        self.footer.setStyleSheet("color:#9ca3af;")
+        # Insertar en layout de wizard
+        lay = QtWidgets.QVBoxLayout()
+        # metemos el layout original dentro de un contenedor
+        central = self.findChild(QtWidgets.QWidget, "qt_wizard_container") or self
+        base = QtWidgets.QVBoxLayout()
+        for i in reversed(range(self.layout().count())):
+            item = self.layout().takeAt(i)
+            if item.widget():
+                base.addWidget(item.widget())
+            elif item.layout():
+                base.addLayout(item.layout())
+        lay.addLayout(base, 1)
+        lay.addWidget(self.footer)
+        self.setLayout(lay)
+
+    def selected_samples_dir(self) -> Path:
+        return self.folder.samples_path()
+
+
+# ----------------- Main Window -----------------
+class MainWindow(QtWidgets.QMainWindow):
+    def __init__(self, samples_dir: Path):
+        super().__init__()
         self.setWindowTitle(APP_NAME)
+        self.samples_dir = samples_dir
+
         self.player = QtMultimedia.QMediaPlayer()
         self.audio_out = QtMultimedia.QAudioOutput()
         self.audio_out.setVolume(0.9)
         self.player.setAudioOutput(self.audio_out)
 
-        # config & samples dir (primer arranque pide carpeta)
-        self.cfg = load_config()
-        self.samples_dir = Path(self.cfg.get("samples_dir", default_samples_dir()))
-        if not self.samples_dir.exists():
-            self.samples_dir = default_samples_dir()
-        self.ensure_samples_dir()
-
-        # UI
         self._build_ui()
         self._load_samples()
         self.search.textChanged.connect(self._apply_filter)
 
-    # ----- UI -----
     def _build_ui(self):
         central = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(central)
@@ -286,7 +339,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scroll.setWidget(self.listHost)
         v.addWidget(self.scroll, 1)
 
-        # footer
+        # footer app (opcional, también visible)
         footer = QtWidgets.QLabel("© 2025 Gabriel Golker")
         footer.setAlignment(QtCore.Qt.AlignHCenter)
         footer.setStyleSheet("color:#9ca3af; padding: 8px 0;")
@@ -300,29 +353,17 @@ class MainWindow(QtWidgets.QMainWindow):
         lab.setStyleSheet("color:#9ca3af; text-transform:uppercase; letter-spacing:.08em; font-size:12px;")
         return lab
 
-    # ----- samples -----
-    def ensure_samples_dir(self):
-        # Primer arranque: preguntar y crear por defecto si no existe
-        if not self.samples_dir.exists():
-            self.samples_dir = default_samples_dir()
-        if not self.samples_dir.exists():
-            self.samples_dir.mkdir(parents=True, exist_ok=True)
-
-        # Si no hay config guardada, ofrezco seleccionar (con default sugerida)
-        first_run = not CONFIG_PATH.exists()
-        if first_run:
-            chosen = choose_samples_dir(self, self.samples_dir)
-            self.samples_dir = chosen
-            self.cfg["samples_dir"] = str(self.samples_dir)
-            save_config(self.cfg)
-
     def change_folder(self):
-        chosen = choose_samples_dir(self, self.samples_dir)
-        self.samples_dir = chosen
-        self.cfg["samples_dir"] = str(self.samples_dir)
-        save_config(self.cfg)
-        self._reload_samples()
+        dlg = QtWidgets.QFileDialog(self, "Seleccionar carpeta de samples")
+        dlg.setFileMode(QtWidgets.QFileDialog.Directory)
+        dlg.setOption(QtWidgets.QFileDialog.ShowDirsOnly, True)
+        dlg.setDirectory(str(self.samples_dir))
+        if dlg.exec():
+            self.samples_dir = Path(dlg.selectedFiles()[0])
+            cfg = load_config(); cfg["samples_dir"] = str(self.samples_dir); save_config(cfg)
+            self._reload_samples()
 
+    # -------- samples --------
     def _collect_files(self):
         files = []
         for root, _, names in os.walk(self.samples_dir):
@@ -339,18 +380,13 @@ class MainWindow(QtWidgets.QMainWindow):
             meta = parse_from_filename(p.name)
             peaks, duration = read_pcm_waveform(p)
             info = {
-                "path": p,
-                "filename": p.name,
-                "genre": meta["genre"],
-                "general": meta["general"],
-                "specifics": meta["specifics"],
-                "title": meta["title"],
-                "key": meta["key"],
-                "duration": duration,
-                "peaks": peaks,
-                "haystack": norm(
-                    " ".join([meta["genre"], meta["general"], " ".join(meta["specifics"]), meta["title"], meta["key"] if meta["key"] != "—" else "", p.name])
-                ),
+                "path": p, "filename": p.name, "duration": duration, "peaks": peaks,
+                "genre": meta["genre"], "general": meta["general"], "specifics": meta["specifics"],
+                "title": meta["title"], "key": meta["key"],
+                "haystack": norm(" ".join([
+                    meta["genre"], meta["general"], " ".join(meta["specifics"]),
+                    meta["title"], (meta["key"] if meta["key"] != "—" else ""), p.name
+                ]))
             }
             row = SampleRow(info)
             row.playRequested.connect(self._toggle_play)
@@ -364,7 +400,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if it.widget(): it.widget().deleteLater()
         self._load_samples()
 
-    # ----- búsqueda -----
+    # -------- búsqueda -----
     def _apply_filter(self, text: str):
         tokens = [t for t in text.strip().lower().split() if t]
         for row in self.rows:
@@ -373,35 +409,55 @@ class MainWindow(QtWidgets.QMainWindow):
                 show = all(t in row.info["haystack"] for t in tokens)
             row.setVisible(show)
 
-    # ----- audio -----
-    def _toggle_play(self, row: 'SampleRow'):
-        # si ya estaba sonando, detener
+    # -------- audio ----------
+    def _toggle_play(self, row: SampleRow):
         if row.isPlaying:
-            self.player.stop()
-            row.setPlaying(False)
+            self._stop_all()
             return
-        # parar otros
-        for r in self.rows:
-            if r.isPlaying:
-                r.setPlaying(False)
-        # reproducir
+        self._stop_all()
         url = QtCore.QUrl.fromLocalFile(str(row.info["path"]))
         self.player.setSource(url)
         self.player.play()
         row.setPlaying(True)
         self.player.mediaStatusChanged.connect(lambda st: self._on_status(st, row))
 
-    def _on_status(self, status, row):
-        if status in (QtMultimedia.QMediaPlayer.EndOfMedia, QtMultimedia.QMediaPlayer.InvalidMedia):
+    def _stop_all(self):
+        for r in self.rows:
+            if r.isPlaying:
+                r.setPlaying(False)
+        self.player.stop()
+
+    def _on_status(self, st, row):
+        if st in (QtMultimedia.QMediaPlayer.EndOfMedia, QtMultimedia.QMediaPlayer.InvalidMedia):
             row.setPlaying(False)
 
 
+# ----------------- arranque -----------------
 def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_ORG)
     app.setStyleSheet(qdarkstyle.load_stylesheet(qt_api="pyside6"))
-    w = MainWindow()
+
+    cfg = load_config()
+    samples_dir = Path(cfg.get("samples_dir", default_samples_dir()))
+
+    # Mostrar wizard si es primer arranque o si la carpeta no existe
+    need_setup = (not CONFIG_PATH.exists()) or (not samples_dir.exists())
+    if need_setup:
+        wiz = SetupWizard()
+        if wiz.exec() == QtWidgets.QDialog.Accepted:
+            chosen = wiz.selected_samples_dir()
+            if not chosen.exists():
+                chosen.mkdir(parents=True, exist_ok=True)
+            cfg["samples_dir"] = str(chosen)
+            save_config(cfg)
+            samples_dir = chosen
+        else:
+            # cancelado → salir
+            sys.exit(0)
+
+    w = MainWindow(samples_dir)
     w.show()
     sys.exit(app.exec())
 
