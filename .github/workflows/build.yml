@@ -8,7 +8,6 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,17 +23,21 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # Opción A: sin .spec (simple)
       - name: Build (onedir)
         run: |
           pyinstaller --noconfirm --onedir --name "Lup Shots" --clean app.py
 
-      # Opción B: con .spec
-      # - name: Build with spec
-      #   run: pyinstaller "pyinstaller.spec"
+      - name: Zip portable
+        shell: bash
+        run: |
+          cd dist
+          7z a LupShots_portable.zip "Lup Shots"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LupShots_onedir
-          path: dist/**/  # sube carpeta con el .exe
+          name: LupShots_portable
+          path: |
+            dist/LupShots_portable.zip
+            dist/Lup Shots/**
+
