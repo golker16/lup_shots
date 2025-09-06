@@ -23,9 +23,9 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build (onedir)
+      - name: Build (onedir, windowed)
         run: |
-          pyinstaller --noconfirm --onedir --name "Lup Shots" --clean app.py
+          pyinstaller --noconfirm --onedir --windowed --name "Lup Shots" --clean app.py
 
       - name: Zip portable
         shell: bash
@@ -40,4 +40,5 @@ jobs:
           path: |
             dist/LupShots_portable.zip
             dist/Lup Shots/**
+
 
