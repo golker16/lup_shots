@@ -16,7 +16,7 @@ CONFIG_DIR  = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
-# ----------------- utilidades -----------------
+# ----------------- util -----------------
 def default_samples_dir() -> Path:
     music = Path(os.path.join(os.environ.get("USERPROFILE", str(Path.home())), "Music"))
     return music / "Lup Samples"
@@ -25,16 +25,16 @@ def load_config():
     if CONFIG_PATH.exists():
         try:
             cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            if "first_run_done" not in cfg:
-                cfg["first_run_done"] = False
+            if "first_run_done" not in cfg: cfg["first_run_done"] = False
+            if "favorites" not in cfg: cfg["favorites"] = []
             return cfg
         except Exception:
             pass
-    return {"samples_dir": str(default_samples_dir()), "first_run_done": False}
+    return {"samples_dir": str(default_samples_dir()), "first_run_done": False, "favorites": []}
 
 def save_config(cfg: dict):
-    if "first_run_done" not in cfg:
-        cfg["first_run_done"] = False
+    if "first_run_done" not in cfg: cfg["first_run_done"] = False
+    if "favorites" not in cfg: cfg["favorites"] = []
     CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def strip_accents_lower(s: str) -> str:
@@ -117,17 +117,17 @@ class TagButton(QtWidgets.QPushButton):
     includeRequested = QtCore.Signal(str)  # clic izq
     excludeRequested = QtCore.Signal(str)  # clic der
 
-    def __init__(self, text: str, tone: str, parent=None, show_minus_hover=True):
+    def __init__(self, text: str, tone: str, parent=None, show_hint=True):
         super().__init__(text, parent)
         self.raw_text = text
-        self.show_minus_hover = show_minus_hover
+        self.show_hint = show_hint
         base = {
-            "blue":   "background:#061e2b;color:#b3e4ff;border:1px solid #123043;",
-            "indigo": "background:#0c0e32;color:#c7c9ff;border:1px solid #1d226b;",
-            "green":  "background:#0e3b24;color:#d4ffe3;border:1px solid #1b5e3a;",
-            "violet": "background:#311251;color:#e7ccff;border:1px solid #52227d;",
+            "blue":   "background:#0b2530;color:#b3e4ff;border:1px solid #123043;",
+            "indigo": "background:#12183c;color:#c7c9ff;border:1px solid #1d226b;",
+            "green":  "background:#0f3d28;color:#d4ffe3;border:1px solid #1b5e3a;",
+            "violet": "background:#351457;color:#e7ccff;border:1px solid #52227d;",
             "red":    "background:#3b1111;color:#ffd4d4;border:1px solid #6b1f1f;",
-            "gray":   "background:#2a2a33;color:#d1d5db;border:1px solid #3a3a44;",
+            "gray":   "background:#232327;color:#d1d5db;border:1px solid #3a3a44;",
         }[tone]
         self.setStyleSheet(base + " border-radius:10px; padding:2px 8px;")
         self.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
@@ -138,38 +138,39 @@ class TagButton(QtWidgets.QPushButton):
             self.excludeRequested.emit(self.raw_text)
         else:
             self.includeRequested.emit(self.raw_text)
-        super().mousePressEvent(e)
+        # no llamamos al super para evitar pulsado "hundido" molesto
+        e.accept()
 
     def enterEvent(self, e):
-        if self.show_minus_hover:
-            self.setText("− " + self.raw_text)
+        if self.show_hint:
+            self.setText("＋/− " + self.raw_text)
         super().enterEvent(e)
 
     def leaveEvent(self, e):
-        if self.show_minus_hover:
+        if self.show_hint:
             self.setText(self.raw_text)
         super().leaveEvent(e)
 
 class SelectedChip(QtWidgets.QWidget):
-    removed = QtCore.Signal(str)  # emite tag
+    removed = QtCore.Signal(str)
 
     def __init__(self, text: str, negate=False, parent=None):
         super().__init__(parent)
         self.tag = text
         lab = QtWidgets.QLabel(("NOT " if negate else "") + text)
         lab.setStyleSheet(
-            ("background:#0e3b24;color:#d4ffe3;border:1px solid #1b5e3a;" if not negate
+            ("background:#0f3d28;color:#d4ffe3;border:1px solid #1b5e3a;" if not negate
              else "background:#3b1111;color:#ffd4d4;border:1px solid #6b1f1f;")
             + " border-radius:10px; padding:2px 8px;"
         )
-        x = QtWidgets.QToolButton()
-        x.setText("×"); x.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
-        x.clicked.connect(lambda: self.removed.emit(self.tag))
-        x.setStyleSheet("color:#e5e7eb;")
+        btn = QtWidgets.QToolButton(); btn.setText("×")
+        btn.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        btn.clicked.connect(lambda: self.removed.emit(self.tag))
+        btn.setStyleSheet("color:#e5e7eb;")
         lay = QtWidgets.QHBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(6)
-        lay.addWidget(lab); lay.addWidget(x)
+        lay.addWidget(lab); lay.addWidget(btn)
 
-# ----------------- mini wave -----------------
+# ----------------- wave -----------------
 class WaveWidget(QtWidgets.QWidget):
     def __init__(self, peaks=None, parent=None):
         super().__init__(parent)
@@ -195,115 +196,121 @@ class WaveWidget(QtWidgets.QWidget):
         w = r.width(); h = r.height()
         bars = len(self._peaks) or 1
         barW = max(1, int(w / bars))
-
         cutoff = int(bars * self._progress)
+
+        p.setPen(QtCore.Qt.NoPen)
 
         # reproducido (claro)
         p.setBrush(QtGui.QColor("#ffffff"))
-        p.setPen(QtCore.Qt.NoPen)
         for i in range(cutoff):
             pk = self._peaks[i] if i < len(self._peaks) else 0
-            bh = max(1, int(pk * h * 0.95))
-            y = int(mid - bh / 2)
+            bh = max(1, int(pk * h * 0.95)); y = int(mid - bh / 2)
             p.drawRect(QtCore.QRect(int(i * (w / bars)), y, int(barW * 0.9), bh))
 
         # resto (gris)
         p.setBrush(QtGui.QColor("#a1a1aa"))
         for i in range(cutoff, bars):
             pk = self._peaks[i] if i < len(self._peaks) else 0
-            bh = max(1, int(pk * h * 0.95))
-            y = int(mid - bh / 2)
+            bh = max(1, int(pk * h * 0.95)); y = int(mid - bh / 2)
             p.drawRect(QtCore.QRect(int(i * (w / bars)), y, int(barW * 0.9), bh))
 
-# ----------------- fila de sample -----------------
+# ----------------- fila -----------------
 class SampleRow(QtWidgets.QFrame):
-    playRequested = QtCore.Signal(object)   # self
+    playClicked = QtCore.Signal(object)      # self
+    starToggled = QtCore.Signal(object)      # self
+    tagInclude  = QtCore.Signal(str)
+    tagExclude  = QtCore.Signal(str)
 
-    def __init__(self, info, parent=None):
+    def __init__(self, info, is_fav: bool, parent=None):
         super().__init__(parent)
         self.info = info
         self.isPlaying = False
+        self.isFav = is_fav
         self.setObjectName("SampleRow")
         self._apply_style()
 
-        # botón play
-        self.btn = QtWidgets.QPushButton("▶")
-        self.btn.setFixedWidth(40)
-        self.btn.clicked.connect(lambda: self.playRequested.emit(self))
-        self.btn.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        # PLAY
+        self.btnPlay = QtWidgets.QPushButton("▶")
+        self.btnPlay.setFixedWidth(40)
+        self.btnPlay.clicked.connect(lambda: self.playClicked.emit(self))
+        self.btnPlay.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
 
-        # chips
-        chip_bar = QtWidgets.QHBoxLayout(); chip_bar.setContentsMargins(0,0,0,0); chip_bar.setSpacing(6)
+        # TAGS
+        chipsL = QtWidgets.QHBoxLayout(); chipsL.setContentsMargins(0,0,0,0); chipsL.setSpacing(6)
         for g in info["genres"]:
-            b = TagButton(g, "blue", show_minus_hover=True)
-            b.includeRequested.connect(self._bubble_include)
-            b.excludeRequested.connect(self._bubble_exclude)
-            chip_bar.addWidget(b)
+            b = TagButton(g, "blue");  b.includeRequested.connect(self.tagInclude); b.excludeRequested.connect(self.tagExclude); chipsL.addWidget(b)
         for g in info["generals"]:
-            b = TagButton(g, "indigo", show_minus_hover=True)
-            b.includeRequested.connect(self._bubble_include)
-            b.excludeRequested.connect(self._bubble_exclude)
-            chip_bar.addWidget(b)
+            b = TagButton(g, "indigo"); b.includeRequested.connect(self.tagInclude); b.excludeRequested.connect(self.tagExclude); chipsL.addWidget(b)
         for s in info["specifics"]:
-            b = TagButton(s, "green", show_minus_hover=True)
-            b.includeRequested.connect(self._bubble_include)
-            b.excludeRequested.connect(self._bubble_exclude)
-            chip_bar.addWidget(b)
-        kb = TagButton(info["key"], "violet", show_minus_hover=True)
-        kb.includeRequested.connect(self._bubble_include)
-        kb.excludeRequested.connect(self._bubble_exclude)
-        chip_bar.addWidget(kb)
+            b = TagButton(s, "green");  b.includeRequested.connect(self.tagInclude); b.excludeRequested.connect(self.tagExclude); chipsL.addWidget(b)
+        kb = TagButton(info["key"], "violet");  kb.includeRequested.connect(self.tagInclude); kb.excludeRequested.connect(self.tagExclude); chipsL.addWidget(kb)
+        chipsW = QtWidgets.QWidget(); ch = QtWidgets.QHBoxLayout(chipsW)
+        ch.setContentsMargins(0,0,0,0); ch.setSpacing(6); ch.addLayout(chipsL); ch.addStretch(1)
 
-        chip_wrap = QtWidgets.QWidget(); chip_l = QtWidgets.QHBoxLayout(chip_wrap)
-        chip_l.setContentsMargins(0,0,0,0); chip_l.setSpacing(6)
-        chip_l.addLayout(chip_bar); chip_l.addStretch(1)
-
-        # nombre
-        self.nameLbl = QtWidgets.QLabel(info["title"])
-        self.nameLbl.setStyleSheet("color:#e5e7eb;")
+        # NOMBRE
+        self.nameLbl = QtWidgets.QLabel(info["title"]); self.nameLbl.setStyleSheet("color:#e5e7eb;")
         self.nameLbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
 
-        left = QtWidgets.QHBoxLayout()
-        left.setContentsMargins(0,0,0,0); left.setSpacing(8)
-        left.addWidget(chip_wrap); left.addWidget(self.nameLbl, 1)
+        # STAR
+        self.btnStar = QtWidgets.QToolButton(); self.btnStar.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        self._sync_star_icon()
+        self.btnStar.clicked.connect(self._toggle_star)
+
+        left = QtWidgets.QHBoxLayout(); left.setContentsMargins(0,0,0,0); left.setSpacing(8)
+        left.addWidget(chipsW); left.addWidget(self.nameLbl, 1); left.addWidget(self.btnStar)
         leftW = QtWidgets.QWidget(); leftW.setLayout(left)
 
-        # wave
+        # WAVE
         self.wave = WaveWidget(info.get("peaks"))
 
         grid = QtWidgets.QGridLayout(self)
         grid.setContentsMargins(10,10,10,10)
         grid.setHorizontalSpacing(10)
-        grid.addWidget(self.btn, 0, 0)
+        grid.addWidget(self.btnPlay, 0, 0)
         grid.addWidget(leftW, 0, 1)
         grid.addWidget(self.wave, 0, 2)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
+        grid.setColumnStretch(1, 1); grid.setColumnStretch(2, 1)
 
-    def _bubble_include(self, tag):
-        self.parent().parent().parent().parent().includeRequested.emit(tag)
-
-    def _bubble_exclude(self, tag):
-        self.parent().parent().parent().parent().excludeRequested.emit(tag)
+        # drag externo
+        self.setMouseTracking(True); self._drag_start = None
 
     def _apply_style(self):
         if self.isPlaying:
             self.setStyleSheet("#SampleRow { background: rgba(37,99,235,0.18); border:1px solid #3b82f6; border-radius:12px; }")
         else:
-            self.setStyleSheet("#SampleRow { background:#1b1b23; border:1px solid #262632; border-radius:12px; }")
+            # fondo base #121214
+            self.setStyleSheet("#SampleRow { background:#19191d; border:1px solid #303039; border-radius:12px; }")
+
+    def _sync_star_icon(self):
+        self.btnStar.setText("★" if self.isFav else "☆")
+        self.btnStar.setToolTip("Quitar de favoritos" if self.isFav else "Marcar como favorito")
+
+    def _toggle_star(self):
+        self.isFav = not self.isFav
+        self._sync_star_icon()
+        self.starToggled.emit(self)
 
     def setPlaying(self, v: bool):
-        self.isPlaying = v
-        self.btn.setText("■" if v else "▶")
-        self._apply_style()
+        self.isPlaying = v; self.btnPlay.setText("⏸" if v else "▶"); self._apply_style()
 
-    def setPeaks(self, peaks):
-        self.wave.setPeaks(peaks)
+    def setProgress(self, p): self.wave.setProgress(p)
+    def setPeaks(self, peaks): self.wave.setPeaks(peaks)
 
-    def setProgress(self, p):
-        self.wave.setProgress(p)
+    # drag
+    def mousePressEvent(self, e: QtGui.QMouseEvent):
+        if e.button() == QtCore.Qt.LeftButton:
+            self._drag_start = e.position().toPoint()
+        super().mousePressEvent(e)
 
-# ----------------- fila de tags sugeridos -----------------
+    def mouseMoveEvent(self, e: QtGui.QMouseEvent):
+        if self._drag_start is None: return super().mouseMoveEvent(e)
+        if (e.position().toPoint() - self._drag_start).manhattanLength() < 8: return
+        drag = QtGui.QDrag(self); mime = QtCore.QMimeData()
+        mime.setUrls([QtCore.QUrl.fromLocalFile(str(self.info["path"]))])
+        drag.setMimeData(mime); drag.exec(QtCore.Qt.CopyAction); self._drag_start = None
+        super().mouseMoveEvent(e)
+
+# ----------------- fila de sugeridos -----------------
 class TagRow(QtWidgets.QWidget):
     includeRequested = QtCore.Signal(str)
     excludeRequested = QtCore.Signal(str)
@@ -311,81 +318,58 @@ class TagRow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         self._tags = []           # [(tag, count)]
-        self._ignored = set()     # ya seleccionados
+        self._ignored = set()
         self._hidden_for_menu = []
 
-        self._wrap = QtWidgets.QHBoxLayout(self)
-        self._wrap.setContentsMargins(0,0,0,0)
-        self._wrap.setSpacing(6)
+        self.wrap = QtWidgets.QHBoxLayout(self)
+        self.wrap.setContentsMargins(0,0,0,0); self.wrap.setSpacing(6)
 
         self.menuBtn = QtWidgets.QToolButton()
         self.menuBtn.setText("…")
-        self.menuBtn.setStyleSheet("background:#2a2a33;color:#e5e7eb;border:1px solid #3a3a44;border-radius:8px;padding:2px 10px;")
+        self.menuBtn.setStyleSheet("background:#232327;color:#e5e7eb;border:1px solid #3a3a44;border-radius:8px;padding:2px 10px;")
         self.menuBtn.clicked.connect(self._open_menu)
 
     def setData(self, tags_with_count, ignored=set()):
-        # Orden: frecuencia desc, luego alfabético
-        self._tags = sorted(
-            [t for t in tags_with_count if t[0] not in ignored],
-            key=lambda x: (-x[1], x[0])
-        )
-        self._ignored = set(ignored)
-        self._rebuild()
+        # orden por frecuencia desc y alfabético
+        self._tags = sorted([t for t in tags_with_count if t[0] not in ignored], key=lambda x: (-x[1], x[0]))
+        self._ignored = set(ignored); self._rebuild()
 
-    def resizeEvent(self, e):
-        self._rebuild()
-        super().resizeEvent(e)
+    def resizeEvent(self, e): self._rebuild(); super().resizeEvent(e)
 
     def _rebuild(self):
-        while self._wrap.count():
-            it = self._wrap.takeAt(0)
+        while self.wrap.count():
+            it = self.wrap.takeAt(0)
             if it.widget(): it.widget().deleteLater()
-        if not self._tags:
-            return
+        if not self._tags: 
+            self.wrap.addStretch(1); self.wrap.addWidget(self.menuBtn); return
 
-        fm = self.fontMetrics()
-        avail = max(0, self.width() - 60)  # 60px para el botón "…"
-        used = 0
-        shown = []
-
+        fm = self.fontMetrics(); avail = max(0, self.width() - 60); used = 0; shown = []
         for tag, cnt in self._tags:
-            chip_width = fm.horizontalAdvance("− " + tag) + 22
-            if used + chip_width > avail:
-                break
-            btn = TagButton(tag, "gray", show_minus_hover=True)
+            chip_width = fm.horizontalAdvance("＋/− " + tag) + 22
+            if used + chip_width > avail: break
+            btn = TagButton(tag, "gray", show_hint=True)
             btn.setToolTip(f"{cnt} coincidencias · Clic: incluir · Der: excluir")
             btn.includeRequested.connect(self.includeRequested.emit)
             btn.excludeRequested.connect(self.excludeRequested.emit)
-            self._wrap.addWidget(btn)
-            used += chip_width + 6
-            shown.append(tag)
-
-        self._wrap.addStretch(1)
-        self._wrap.addWidget(self.menuBtn)
+            self.wrap.addWidget(btn); used += chip_width + 6; shown.append(tag)
+        self.wrap.addStretch(1); self.wrap.addWidget(self.menuBtn)
         self._hidden_for_menu = [t for t, _ in self._tags if t not in shown]
 
     def _open_menu(self):
-        if not self._tags:
-            return
         m = QtWidgets.QMenu(self)
-        m.setStyleSheet("QMenu{background:#111827;color:#e5e7eb;border:1px solid #374151;}"
-                        "QMenu::item:selected{background:#1f2937;}")
-        for tag in self._hidden_for_menu[:60]:
-            act = QtGui.QAction(tag, m)
-            act.setToolTip("Clic para incluir (clic derecho para excluir)")
-            def handler(checked=False, t=tag):
-                self.includeRequested.emit(t)
-            act.triggered.connect(handler)
-            m.addAction(act)
+        m.setStyleSheet("QMenu{background:#121214;color:#e5e7eb;border:1px solid #2e2e33;} QMenu::item:selected{background:#1f2024;}")
         if not self._hidden_for_menu:
             m.addAction("(sin más tags)").setEnabled(False)
+        for tag in self._hidden_for_menu[:80]:
+            act = QtGui.QAction(tag, m)
+            act.setToolTip("Clic: incluir · Clic derecho: excluir")
+            def trig(checked=False, t=tag): self.includeRequested.emit(t)
+            act.triggered.connect(trig)
+            m.addAction(act)
         m.exec(self.menuBtn.mapToGlobal(QtCore.QPoint(self.menuBtn.width()//2, self.menuBtn.height())))
         
 # ----------------- ventana principal -----------------
 class MainWindow(QtWidgets.QMainWindow):
-    includeRequested = QtCore.Signal(str)
-    excludeRequested = QtCore.Signal(str)
-
     def __init__(self, samples_dir: Path):
         super().__init__()
         self.setWindowTitle("Lup Shots")
@@ -393,37 +377,46 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # audio
         self.player = QtMultimedia.QMediaPlayer()
-        self.audio_out = QtMultimedia.QAudioOutput()
-        self.audio_out.setVolume(0.9)
+        self.audio_out = QtMultimedia.QAudioOutput(); self.audio_out.setVolume(0.9)
         self.player.setAudioOutput(self.audio_out)
         self.player.positionChanged.connect(self._on_position)
         self.player.mediaStatusChanged.connect(self._on_status)
+        self.player.playbackStateChanged.connect(self._on_state)
 
         # filtros
         self.include_tags = set()
         self.exclude_tags = set()
         self.search_tokens = []
 
+        # favoritos
+        cfg = load_config(); self.favorites = set(cfg.get("favorites", []))
+
         # UI
         self._build_ui()
         self._load_samples()
+        self._apply_filters()
         self._refresh_tag_suggestions()
-        self.search.textChanged.connect(self._on_search_text)
 
-        # wiring para clicks en chips dentro de filas
-        self.includeRequested.connect(self._include_tag)
-        self.excludeRequested.connect(self._exclude_tag)
-
-        # navegación teclado
+        # teclado global
         self._current_row = None
         self.installEventFilter(self)
 
     # ---------- UI ----------
     def _build_ui(self):
         central = QtWidgets.QWidget()
-        v = QtWidgets.QVBoxLayout(central)
-        v.setContentsMargins(16,16,16,8)
-        v.setSpacing(10)
+        v = QtWidgets.QVBoxLayout(central); v.setContentsMargins(16,16,16,8); v.setSpacing(10)
+
+        # Estilo fondo app
+        palette = self.palette()
+        palette.setColor(QtGui.QPalette.Window, QtGui.QColor("#121214"))
+        central.setAutoFillBackground(True); central.setPalette(palette)
+        self.setStyleSheet("""
+            QMainWindow, QWidget { background-color: #121214; }
+            QLineEdit { background:#1a1a1f; border:1px solid #2e2e33; border-radius:10px; padding:6px 10px; color:#e5e7eb; }
+            QScrollArea { border: none; }
+            QMenuBar { background:#121214; color:#e5e7eb; }
+            QMenuBar::item:selected { background:#1f2024; }
+        """)
 
         # menú
         menu = self.menuBar()
@@ -435,16 +428,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # buscador
         self.search = QtWidgets.QLineEdit()
         self.search.setPlaceholderText("Buscar (tags, nombre o key)…")
+        self.search.textChanged.connect(self._on_search_text)
         v.addWidget(self.search)
 
         # filtros activos
         self.activeWrap = QtWidgets.QHBoxLayout()
-        self.activeWrap.setContentsMargins(0,0,0,0)
-        self.activeWrap.setSpacing(6)
+        self.activeWrap.setContentsMargins(0,0,0,0); self.activeWrap.setSpacing(6)
         activeW = QtWidgets.QWidget(); activeW.setLayout(self.activeWrap)
         v.addWidget(activeW)
 
-        # fila de sugeridos
+        # fila sugeridos
         self.tagRow = TagRow()
         self.tagRow.includeRequested.connect(self._include_tag)
         self.tagRow.excludeRequested.connect(self._exclude_tag)
@@ -454,8 +447,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scroll = QtWidgets.QScrollArea(); self.scroll.setWidgetResizable(True)
         self.listHost = QtWidgets.QWidget()
         self.listLayout = QtWidgets.QVBoxLayout(self.listHost)
-        self.listLayout.setContentsMargins(0,0,0,0)
-        self.listLayout.setSpacing(8)
+        self.listLayout.setContentsMargins(0,0,0,0); self.listLayout.setSpacing(8)
         self.scroll.setWidget(self.listHost)
         v.addWidget(self.scroll, 1)
 
@@ -468,7 +460,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
         self.resize(1180, 760)
 
-    # ---------- carga samples ----------
+    # ---------- carga ----------
     def _collect_files(self):
         files = []
         for root, _, names in os.walk(self.samples_dir):
@@ -485,175 +477,165 @@ class MainWindow(QtWidgets.QMainWindow):
             meta = parse_from_filename(p.name)
             peaks, duration = read_pcm_waveform(p)
             tags_flat = list(meta["genres"] + meta["generals"] + meta["specifics"])
-            if meta["key"] != "—":
-                tags_flat.append(meta["key"])
-            hay = strip_accents_lower(" ".join(
-                tags_flat + [meta["title"], p.name]
-            ))
+            if meta["key"] != "—": tags_flat.append(meta["key"])
+            hay = strip_accents_lower(" ".join(tags_flat + [meta["title"], p.name]))
             info = {
-                "path": p,
-                "filename": p.name,
-                "genres": meta["genres"],
-                "generals": meta["generals"],
-                "specifics": meta["specifics"],
-                "title": meta["title"],
-                "key": meta["key"],
-                "peaks": peaks,
-                "duration": duration,
-                "haystack": hay,
-                "tagset": set(tags_flat),
+                "path": p, "filename": p.name,
+                "genres": meta["genres"], "generals": meta["generals"], "specifics": meta["specifics"],
+                "title": meta["title"], "key": meta["key"], "peaks": peaks, "duration": duration,
+                "haystack": hay, "tagset": set(tags_flat),
             }
-            row = SampleRow(info)
-            row.playRequested.connect(self._toggle_play_row)
-            self.rows.append(row)
-            self.samples.append(info)
-            self.listLayout.addWidget(row)
+            row = SampleRow(info, is_fav=(p.name in self.favorites))
+            row.playClicked.connect(self._toggle_play_row)
+            row.tagInclude.connect(self._include_tag)
+            row.tagExclude.connect(self._exclude_tag)
+            row.starToggled.connect(self._toggle_favorite)
+            self.rows.append(row); self.samples.append(info); self.listLayout.addWidget(row)
         self.listLayout.addStretch(1)
 
-    # ---------- filtrado ----------
+    # ---------- favoritos ----------
+    def _toggle_favorite(self, row: SampleRow):
+        name = row.info["filename"]
+        if row.isFav: self.favorites.add(name)
+        else: self.favorites.discard(name)
+        cfg = load_config(); cfg["favorites"] = sorted(self.favorites); save_config(cfg)
+        self._apply_filters()        # reordena colocando favoritos arriba
+
+    # ---------- filtros ----------
     def _on_search_text(self, text: str):
         self.search_tokens = [strip_accents_lower(t) for t in text.strip().split() if t]
         self._apply_filters()
         self._refresh_tag_suggestions()
 
     def _include_tag(self, tag: str):
-        if tag in self.exclude_tags:
-            self.exclude_tags.remove(tag)
-        self.include_tags.add(tag)
-        self._redraw_active_filters()
-        self._apply_filters()
-        self._refresh_tag_suggestions()
+        self.exclude_tags.discard(tag); self.include_tags.add(tag)
+        self._redraw_active_filters(); self._apply_filters(); self._refresh_tag_suggestions()
 
     def _exclude_tag(self, tag: str):
-        if tag in self.include_tags:
-            self.include_tags.remove(tag)
-        self.exclude_tags.add(tag)
-        self._redraw_active_filters()
-        self._apply_filters()
-        self._refresh_tag_suggestions()
+        self.include_tags.discard(tag); self.exclude_tags.add(tag)
+        self._redraw_active_filters(); self._apply_filters(); self._refresh_tag_suggestions()
 
     def _remove_tag(self, tag: str):
-        self.include_tags.discard(tag)
-        self.exclude_tags.discard(tag)
-        self._redraw_active_filters()
-        self._apply_filters()
-        self._refresh_tag_suggestions()
+        self.include_tags.discard(tag); self.exclude_tags.discard(tag)
+        self._redraw_active_filters(); self._apply_filters(); self._refresh_tag_suggestions()
 
     def _redraw_active_filters(self):
         while self.activeWrap.count():
             it = self.activeWrap.takeAt(0)
             if it.widget(): it.widget().deleteLater()
-        # incluidos
         for t in sorted(self.include_tags):
-            c = SelectedChip(t, negate=False)
-            c.removed.connect(self._remove_tag)
-            self.activeWrap.addWidget(c)
-        # excluidos
+            chip = SelectedChip(t, negate=False); chip.removed.connect(self._remove_tag); self.activeWrap.addWidget(chip)
         for t in sorted(self.exclude_tags):
-            c = SelectedChip(t, negate=True)
-            c.removed.connect(self._remove_tag)
-            self.activeWrap.addWidget(c)
+            chip = SelectedChip(t, negate=True);  chip.removed.connect(self._remove_tag); self.activeWrap.addWidget(chip)
         self.activeWrap.addStretch(1)
 
     def _apply_filters(self):
+        # visibilidad
         for i, row in enumerate(self.rows):
             s = self.samples[i]
             visible = True
-            # búsqueda
             for tok in self.search_tokens:
-                if tok not in s["haystack"]:
-                    visible = False
-                    break
-            if visible and self.include_tags:
-                # incluidos (AND)
-                if not self.include_tags.issubset(s["tagset"]):
-                    visible = False
-            if visible and self.exclude_tags:
-                if self.exclude_tags.intersection(s["tagset"]):
-                    visible = False
+                if tok not in s["haystack"]: visible = False; break
+            if visible and self.include_tags and not self.include_tags.issubset(s["tagset"]): visible = False
+            if visible and self.exclude_tags and self.exclude_tags.intersection(s["tagset"]): visible = False
             row.setVisible(visible)
 
+        # orden -> favoritos primero, luego alfabético de título
+        visible_rows = [r for r in self.rows if r.isVisible()]
+        hidden_rows  = [r for r in self.rows if not r.isVisible()]
+        visible_rows.sort(key=lambda r: (0 if r.info["filename"] in self.favorites else 1,
+                                         strip_accents_lower(r.info["title"])))
+        # reinsertar en el layout en ese orden
+        for i in reversed(range(self.listLayout.count())):
+            it = self.listLayout.takeAt(i)
+            if it and it.widget(): self.listLayout.removeItem(it)
+        for r in visible_rows + hidden_rows:
+            self.listLayout.addWidget(r)
+        self.listLayout.addStretch(1)
+
     def _refresh_tag_suggestions(self):
-        # FREC DE TAGS EN RESULTADOS VISIBLES (ya aplicados búsqueda + include + exclude)
+        # frecuencia de tags SOLO sobre lo visible
         freq = Counter()
         for i, row in enumerate(self.rows):
-            if not row.isVisible():  # solo lo que quedó visible
-                continue
+            if not row.isVisible(): continue
             s = self.samples[i]
             for t in s["tagset"]:
-                # no sugerir tags ya seleccionados
-                if t in self.include_tags or t in self.exclude_tags:
-                    continue
+                if t in self.include_tags or t in self.exclude_tags: continue
                 freq[t] += 1
-
-        # lista (tag, count) → TagRow se encarga de ordenar por (-count, tag)
         tags_with_count = list(freq.items())
-        ignored = self.include_tags | self.exclude_tags
-        self.tagRow.setData(tags_with_count, ignored)
+        self.tagRow.setData(tags_with_count, ignored=self.include_tags | self.exclude_tags)
 
     # ---------- reproducción ----------
     def _toggle_play_row(self, row: SampleRow):
-        # si ya está sonando → re-disparo (reinicia desde 0)
-        if row.isPlaying:
-            self.player.setPosition(0)
-            self.player.play()
+        # si es el actual:
+        if self._current_row is row:
+            st = self.player.playbackState()
+            if st == QtMultimedia.QMediaPlayer.PlayingState:
+                self.player.pause(); row.setPlaying(False)  # pausa
+            elif st == QtMultimedia.QMediaPlayer.PausedState:
+                self.player.play(); row.setPlaying(True)    # reanuda
+            else:  # StoppedState -> volver a 0 y play
+                self.player.setPosition(0); self.player.play(); row.setPlaying(True)
             return
-        # parar todo
-        for r in self.rows:
-            if r.isPlaying:
-                r.setPlaying(False)
-        # preparar y sonar
+
+        # parar el que estuviera
+        if self._current_row:
+            self._current_row.setPlaying(False)
+
+        # preparar nuevo y play
         url = QtCore.QUrl.fromLocalFile(str(row.info["path"]))
         self.player.setSource(url)
+        self.player.setPosition(0)
         self.player.play()
         row.setPlaying(True)
         self._current_row = row
 
+    def _on_state(self, st):
+        # actualiza icono play/pausa
+        if not self._current_row: return
+        if st == QtMultimedia.QMediaPlayer.PlayingState:
+            self._current_row.setPlaying(True)
+        elif st == QtMultimedia.QMediaPlayer.PausedState:
+            self._current_row.setPlaying(False)
+
     def _on_position(self, pos_ms: int):
-        if not self._current_row:
-            return
+        if not self._current_row: return
         dur = max(1, int(self.player.duration()))
         p = max(0.0, min(1.0, pos_ms / float(dur)))
         self._current_row.setProgress(p)
 
     def _on_status(self, status):
-        # al terminar, deseleccionar y permitir replay
+        # al terminar, permitir reproducir de nuevo
         if status == QtMultimedia.QMediaPlayer.EndOfMedia and self._current_row:
             self._current_row.setPlaying(False)
             self._current_row.setProgress(0.0)
-            self._current_row = None
+            # dejar seleccionado para que al clic vuelva a empezar
+            self.player.setPosition(0)
 
-    # ---------- teclado (↑/↓/Enter/Espacio) ----------
+    # ---------- teclado ----------
     def eventFilter(self, obj, ev):
         if ev.type() == QtCore.QEvent.KeyPress:
             key = ev.key()
             visible_rows = [r for r in self.rows if r.isVisible()]
-            if not visible_rows:
-                return False
-            if key in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return, QtCore.Qt.Key_Space):
+            if not visible_rows: return False
+            if key == QtCore.Qt.Key_Space:
+                # pausa / reanuda
+                if self._current_row is None:
+                    self._toggle_play_row(visible_rows[0]); return True
+                self._toggle_play_row(self._current_row); return True
+            if key in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return):
                 target = self._current_row or visible_rows[0]
-                self._toggle_play_row(target)
-                return True
-            elif key == QtCore.Qt.Key_Down:
-                if self._current_row is None:
-                    self._toggle_play_row(visible_rows[0]); return True
-                try:
-                    idx = visible_rows.index(self._current_row)
-                except ValueError:
-                    idx = -1
+                self._toggle_play_row(target); return True
+            if key == QtCore.Qt.Key_Down:
+                if self._current_row is None: self._toggle_play_row(visible_rows[0]); return True
+                idx = visible_rows.index(self._current_row) if self._current_row in visible_rows else -1
                 next_row = visible_rows[min(idx + 1, len(visible_rows) - 1)]
-                self._toggle_play_row(next_row)
-                return True
-            elif key == QtCore.Qt.Key_Up:
-                if self._current_row is None:
-                    self._toggle_play_row(visible_rows[0]); return True
-                try:
-                    idx = visible_rows.index(self._current_row)
-                except ValueError:
-                    idx = 0
+                self._toggle_play_row(next_row); return True
+            if key == QtCore.Qt.Key_Up:
+                if self._current_row is None: self._toggle_play_row(visible_rows[0]); return True
+                idx = visible_rows.index(self._current_row) if self._current_row in visible_rows else 0
                 prev_row = visible_rows[max(idx - 1, 0)]
-                self._toggle_play_row(prev_row)
-                return True
+                self._toggle_play_row(prev_row); return True
         return False
 
     # ---------- carpeta ----------
@@ -678,50 +660,35 @@ class WelcomeDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Bienvenido a Lup Shots")
-        self.setModal(True)
-        self.setMinimumWidth(520)
+        self.setModal(True); self.setMinimumWidth(520)
 
         title = QtWidgets.QLabel("<b>Bienvenido a Lup Shots</b>")
         sub   = QtWidgets.QLabel("Selecciona la carpeta donde están (o pondrás) tus shots.")
         sub.setWordWrap(True)
 
         self.pathEdit = QtWidgets.QLineEdit(str(default_samples_dir()))
-        browse = QtWidgets.QPushButton("Examinar…")
-        browse.clicked.connect(self._browse)
+        browse = QtWidgets.QPushButton("Examinar…"); browse.clicked.connect(self._browse)
 
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(self.pathEdit, 1)
-        row.addWidget(browse)
+        row = QtWidgets.QHBoxLayout(); row.addWidget(self.pathEdit, 1); row.addWidget(browse)
 
-        useBtn = QtWidgets.QPushButton("Usar esta carpeta")
-        useBtn.setDefault(True)
+        useBtn = QtWidgets.QPushButton("Usar esta carpeta"); useBtn.setDefault(True)
         cancel = QtWidgets.QPushButton("Cancelar")
-        useBtn.clicked.connect(self.accept)
-        cancel.clicked.connect(self.reject)
+        useBtn.clicked.connect(self.accept); cancel.clicked.connect(self.reject)
 
-        btns = QtWidgets.QHBoxLayout()
-        btns.addStretch(1)
-        btns.addWidget(cancel)
-        btns.addWidget(useBtn)
+        btns = QtWidgets.QHBoxLayout(); btns.addStretch(1); btns.addWidget(cancel); btns.addWidget(useBtn)
 
         footer = QtWidgets.QLabel("© 2025 Gabriel Golker")
         footer.setAlignment(QtCore.Qt.AlignHCenter)
         footer.setStyleSheet("color:#9ca3af; padding-top:8px;")
 
         lay = QtWidgets.QVBoxLayout(self)
-        lay.addWidget(title)
-        lay.addWidget(sub)
-        lay.addLayout(row)
-        lay.addLayout(btns)
-        lay.addWidget(footer)
+        lay.addWidget(title); lay.addWidget(sub); lay.addLayout(row); lay.addLayout(btns); lay.addWidget(footer)
 
     def _browse(self):
         dlg = QtWidgets.QFileDialog(self, "Seleccionar carpeta de samples")
-        dlg.setFileMode(QtWidgets.QFileDialog.Directory)
-        dlg.setOption(QtWidgets.QFileDialog.ShowDirsOnly, True)
+        dlg.setFileMode(QtWidgets.QFileDialog.Directory); dlg.setOption(QtWidgets.QFileDialog.ShowDirsOnly, True)
         dlg.setDirectory(self.pathEdit.text())
-        if dlg.exec():
-            self.pathEdit.setText(dlg.selectedFiles()[0])
+        if dlg.exec(): self.pathEdit.setText(dlg.selectedFiles()[0])
 
     def selected_path(self) -> Path:
         return Path(self.pathEdit.text().strip() or str(default_samples_dir()))
@@ -729,27 +696,23 @@ class WelcomeDialog(QtWidgets.QDialog):
 # ----------------- arranque -----------------
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    app.setApplicationName(APP_NAME)
-    app.setOrganizationName(APP_ORG)
-    app.setStyleSheet(qdarkstyle.load_stylesheet(qt_api="pyside6"))
-
+    app.setApplicationName(APP_NAME); app.setOrganizationName(APP_ORG)
+    # qdarkstyle + override de fondo #121214
+    app.setStyleSheet(qdarkstyle.load_stylesheet(qt_api="pyside6") + "\nQWidget{background-color:#121214;}")
     cfg = load_config()
+
     need_setup = (not cfg.get("first_run_done", False)) or (not Path(cfg.get("samples_dir", "")).exists())
     if need_setup:
         dlg = WelcomeDialog()
         if dlg.exec() == QtWidgets.QDialog.Accepted:
             chosen = dlg.selected_path()
-            if not chosen.exists():
-                chosen.mkdir(parents=True, exist_ok=True)
-            cfg["samples_dir"] = str(chosen)
-            cfg["first_run_done"] = True
-            save_config(cfg)
+            if not chosen.exists(): chosen.mkdir(parents=True, exist_ok=True)
+            cfg["samples_dir"] = str(chosen); cfg["first_run_done"] = True; save_config(cfg)
         else:
             sys.exit(0)
 
     samples_dir = Path(cfg["samples_dir"])
-    w = MainWindow(samples_dir)
-    w.show()
+    w = MainWindow(samples_dir); w.show()
     sys.exit(app.exec())
 
 if __name__ == "__main__":
