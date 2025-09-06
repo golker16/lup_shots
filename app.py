@@ -70,7 +70,7 @@ def parse_from_filename(filename: str):
     return dict(genres=genres, generals=generals, specifics=specifics, title=title, key=key)
 
 def read_pcm_waveform(path: Path, peaks=WAVE_PEAKS):
-    """Onda rápida para WAV PCM; otros formatos → placeholder (None)."""
+    """Onda rápida para WAV PCM; otros formatos → None (sin dependencias externas)."""
     try:
         if path.suffix.lower() not in {".wav"}:
             return None, 0.0
@@ -187,10 +187,10 @@ class WaveWidget(QtWidgets.QWidget):
         self._peaks = peaks or []
         self._progress = 0.0
         self.setMinimumHeight(42)
-        self.setMinimumWidth(24)  # se puede comprimir MUCHO
+        self.setMinimumWidth(24)  # puede comprimirse MUCHO
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setStyleSheet("background: transparent;")
-        self.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
+        self.setSizePolicy(QtWidgets.QSizePolicy.MinimumExpanding, QtWidgets.QSizePolicy.Fixed)
 
     def setPeaks(self, peaks): self._peaks = peaks or []; self.update()
     def setProgress(self, p): self._progress = max(0.0, min(1.0, p)); self.update()
@@ -260,7 +260,7 @@ class SampleRow(QtWidgets.QFrame):
         self.btnStar.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
         self._sync_star_icon()
         self.btnStar.clicked.connect(self._toggle_star)
-        self._update_star_visibility(initial=True)
+        self._update_star_visibility(show_hover=False)
 
         left = QtWidgets.QHBoxLayout(); left.setContentsMargins(0,0,0,0); left.setSpacing(8)
         left.addWidget(chipsW); left.addWidget(self.nameLbl, 1); left.addWidget(self.btnStar)
@@ -268,7 +268,7 @@ class SampleRow(QtWidgets.QFrame):
 
         # WAVE
         self.wave = WaveWidget(info.get("peaks"))
-        self.wave.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
+        self.wave.setSizePolicy(QtWidgets.QSizePolicy.MinimumExpanding, QtWidgets.QSizePolicy.Fixed)
 
         grid = QtWidgets.QGridLayout(self)
         grid.setContentsMargins(10,10,10,10)
@@ -276,8 +276,8 @@ class SampleRow(QtWidgets.QFrame):
         grid.addWidget(self.btnPlay, 0, 0)
         grid.addWidget(leftW, 0, 1)
         grid.addWidget(self.wave, 0, 2)
-        grid.setColumnStretch(1, 1)     # nombre/tags crecen
-        grid.setColumnStretch(2, 0)     # wave acepta comprimirse al mínimo
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)  # <- importante: la wave siempre recibe ancho
 
         # hover para estrella
         self.setMouseTracking(True)
@@ -301,12 +301,11 @@ class SampleRow(QtWidgets.QFrame):
         self.btnStar.setText("★" if self.isFav else "☆")
         self.btnStar.setToolTip("Quitar de favoritos" if self.isFav else "Marcar como favorito")
 
-    def _update_star_visibility(self, show_hover=False, initial=False):
+    def _update_star_visibility(self, show_hover: bool):
         if self.isFav:
             self.btnStar.setVisible(True)   # ★ siempre visible
         else:
-            # ☆ visible solo en hover sobre la fila
-            self.btnStar.setVisible(bool(show_hover or initial is True and False))
+            self.btnStar.setVisible(show_hover)  # ☆ solo en hover
 
     def _toggle_star(self):
         self.isFav = not self.isFav
@@ -435,6 +434,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # menú -> "Opciones"
         menubar = self.menuBar()
+        menubar.setNativeMenuBar(False)  # <-- fuerza barra en ventana (necesario para cornerWidget)
         options = menubar.addMenu("&Opciones")
         act_change = options.addAction("Cambiar carpeta de &samples…")
         act_change.triggered.connect(self.change_folder)
@@ -749,6 +749,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
