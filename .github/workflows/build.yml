@@ -1,0 +1,40 @@
+name: build-windows-onedir
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      # Opción A: sin .spec (simple)
+      - name: Build (onedir)
+        run: |
+          pyinstaller --noconfirm --onedir --name "Lup Shots" --clean app.py
+
+      # Opción B: con .spec
+      # - name: Build with spec
+      #   run: pyinstaller "pyinstaller.spec"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LupShots_onedir
+          path: dist/**/  # sube carpeta con el .exe
