@@ -1,5 +1,5 @@
-# app.py (refinado para navegación fluida con ↑/↓, sin waveform, click en fila, y drag&drop)
-import os, re, sys, json, unicodedata
+# app.py (popover de reproductor con onda flotante, ↑/↓ fluido, click en fila, drag&drop, y etiquetas de sample/bit)
+import os, re, sys, json, unicodedata, contextlib, wave
 from pathlib import Path
 from collections import Counter
 
@@ -69,7 +69,56 @@ def parse_from_filename(filename: str):
 
     return dict(genres=genres, generals=generals, specifics=specifics, title=title, key=key)
 
-# ----------------- chips -----------------
+def read_pcm_waveform(path: Path, peaks=160):
+    """
+    Devuelve (peaks:list[float] or None, duration:float, sample_rate:int|0, bit_depth:int|0)
+    Solo WAV PCM sin dependencias externas. Otros formatos: (None, 0.0, 0, 0)
+    """
+    try:
+        if path.suffix.lower() != ".wav":
+            return None, 0.0, 0, 0
+        with contextlib.closing(wave.open(str(path), "rb")) as wf:
+            n_channels = wf.getnchannels()
+            n_frames   = wf.getnframes()
+            framerate  = wf.getframerate()
+            sampwidth  = wf.getsampwidth()  # bytes por muestra
+            duration   = (n_frames / float(framerate)) if framerate else 0.0
+            bit_depth  = sampwidth * 8
+            sample_rate = framerate
+
+            blocks = max(1, peaks)
+            step = max(1, n_frames // blocks)
+            import struct
+            out = []
+            for i in range(blocks):
+                wf.setpos(min(i * step, n_frames - 1))
+                frames = wf.readframes(min(step, n_frames - i * step))
+                if sampwidth == 3:  # 24-bit aprox
+                    # Leer solo canal 0 para rapidez (pico relativo)
+                    samples = []
+                    stride = 3 * n_channels
+                    for j in range(0, len(frames) - stride + 1, stride):
+                        chunk = frames[j:j+3]
+                        b = int.from_bytes(chunk, "little", signed=True)
+                        samples.append(abs(b) / float(2**23))
+                else:
+                    fmt_char = {1:"b", 2:"h", 4:"i"}.get(sampwidth)
+                    if not fmt_char:
+                        out.append(0.0); continue
+                    fmt = "<" + fmt_char * (len(frames) // sampwidth)
+                    ints = struct.unpack(fmt, frames)
+                    ch0 = ints[0::n_channels] if n_channels > 0 else ints
+                    max_val = float(2 ** (bit_depth - 1))
+                    samples = [abs(x) / (max_val or 1.0) for x in ch0]
+                peak = max(samples) if samples else 0.0
+                out.append(peak)
+            mx = max(out) if out else 1.0
+            peaks_norm = [p / (mx or 1.0) for p in out]
+            return peaks_norm, duration, sample_rate, bit_depth
+    except Exception:
+        return None, 0.0, 0, 0
+
+# ----------------- UI: chips -----------------
 class TagChip(QtWidgets.QFrame):
     includeRequested = QtCore.Signal(str)  # clic IZQ o botón ＋
     excludeRequested = QtCore.Signal(str)  # clic DER o botón −
@@ -166,6 +215,128 @@ class DragButton(QtWidgets.QToolButton):
         else:
             super().mouseMoveEvent(e)
 
+# ----------------- WaveWidget (solo popover) -----------------
+class WaveWidget(QtWidgets.QWidget):
+    def __init__(self, peaks=None, parent=None):
+        super().__init__(parent)
+        self._peaks = peaks or []
+        self._progress = 0.0
+        self.setMinimumHeight(54)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setStyleSheet("background: transparent;")
+        self.setSizePolicy(QtWidgets.QSizePolicy.MinimumExpanding, QtWidgets.QSizePolicy.Fixed)
+
+    def setPeaks(self, peaks): self._peaks = peaks or []; self.update()
+    def setProgress(self, p): self._progress = max(0.0, min(1.0, p)); self.update()
+
+    def paintEvent(self, e):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, False)
+        r = self.rect()
+        mid = r.center().y()
+        w = max(1, r.width()); h = r.height()
+        bars = max(1, len(self._peaks) or 120)
+        barW = max(1, int(w / bars))
+        cutoff = int(bars * self._progress)
+        p.setPen(QtCore.Qt.NoPen)
+
+        # pasado (izq) y futuro (der)
+        p.setBrush(QtGui.QColor("#e5e7eb"))
+        for i in range(min(cutoff, bars)):
+            pk = self._peaks[i] if (self._peaks and i < len(self._peaks)) else 0.35
+            bh = max(1, int(pk * h * 0.92)); y = int(mid - bh / 2)
+            p.drawRect(QtCore.QRect(int(i * (w / bars)), y, max(1, int(barW * 0.85)), bh))
+
+        p.setBrush(QtGui.QColor("#a1a1aa"))
+        for i in range(cutoff, bars):
+            pk = self._peaks[i] if (self._peaks and i < len(self._peaks)) else 0.35
+            bh = max(1, int(pk * h * 0.92)); y = int(mid - bh / 2)
+            p.drawRect(QtCore.QRect(int(i * (w / bars)), y, max(1, int(barW * 0.85)), bh))
+
+# ----------------- Popover del reproductor -----------------
+class PlayerPopover(QtWidgets.QFrame):
+    def __init__(self, parent_window: QtWidgets.QMainWindow):
+        # Top-level (sin padre) para evitar clipping en scroll; stays on top de la app.
+        super().__init__(None)
+        self._parent_window = parent_window
+        self.setWindowFlags(QtCore.Qt.Tool | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setObjectName("PlayerPopover")
+
+        # Sombra suave
+        shadow = QtWidgets.QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(24); shadow.setXOffset(0); shadow.setYOffset(8); shadow.setColor(QtGui.QColor(0,0,0,150))
+        self.setGraphicsEffect(shadow)
+
+        # Contenido
+        wrap = QtWidgets.QVBoxLayout(self)
+        wrap.setContentsMargins(10,10,10,10)
+        wrap.setSpacing(8)
+
+        body = QtWidgets.QFrame(self)
+        body.setStyleSheet("#PlayerPopover > QFrame { background:#101014; border:1px solid #2e2e33; border-radius:12px; }")
+        inner = QtWidgets.QHBoxLayout(body); inner.setContentsMargins(12,12,12,12); inner.setSpacing(12)
+
+        self.wave = WaveWidget()
+        inner.addWidget(self.wave, 1)
+
+        rightBox = QtWidgets.QVBoxLayout(); rightBox.setContentsMargins(0,0,0,0); rightBox.setSpacing(4)
+        self.lblRate = QtWidgets.QLabel("—")
+        self.lblBits = QtWidgets.QLabel("—")
+        for lbl in (self.lblRate, self.lblBits):
+            lbl.setStyleSheet("color:#cbd5e1;")  # etiquetas sin color llamativo
+            lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        rightBox.addWidget(self.lblRate)
+        rightBox.addWidget(self.lblBits)
+        inner.addLayout(rightBox, 0)
+
+        wrap.addWidget(body)
+
+        # datos
+        self._duration_ms = 1
+        self._anchor_widget = None
+
+        # tamaño por defecto
+        self.resize(560, 96)
+
+    def setInfo(self, peaks, sample_rate, bit_depth, duration_ms: int):
+        self.wave.setPeaks(peaks)
+        self._duration_ms = max(1, duration_ms)
+        # Etiquetas
+        rate_txt = f"{sample_rate/1000:.1f} kHz" if sample_rate else "—"
+        bits_txt = f"{bit_depth}-bit" if bit_depth else "—"
+        self.lblRate.setText(rate_txt)
+        self.lblBits.setText(bits_txt)
+
+    def setProgressMs(self, pos_ms: int):
+        frac = max(0.0, min(1.0, pos_ms / float(self._duration_ms)))
+        self.wave.setProgress(frac)
+
+    def show_for_anchor(self, anchor: QtWidgets.QWidget):
+        # Guardar anchor para reposicionar con scroll/resize
+        self._anchor_widget = anchor
+        self._reposition()
+        self.show()
+        self.raise_()
+
+    def _reposition(self):
+        if not self._anchor_widget:
+            return
+        # Posición: justo debajo del anchor (botón play del row), con pequeño margen
+        global_pt = self._anchor_widget.mapToGlobal(QtCore.QPoint(0, self._anchor_widget.height()))
+        # margen lateral; asegurar dentro de la ventana
+        screen_w = self._parent_window.width()
+        desired_w = min(640, max(420, int(screen_w * 0.55)))
+        self.resize(desired_w, self.height())
+        x = global_pt.x() - 12  # un poco alineado a la izquierda del botón
+        y = global_pt.y() + 6
+        # Evitar desbordes laterales respecto a la ventana principal
+        win_geom = self._parent_window.frameGeometry()
+        min_x = win_geom.left() + 16
+        max_x = win_geom.right() - self.width() - 16
+        x = max(min_x, min(x, max_x))
+        self.move(x, y)
+
 # ----------------- fila -----------------
 class SampleRow(QtWidgets.QFrame):
     playClicked = QtCore.Signal(object)      # self
@@ -234,6 +405,10 @@ class SampleRow(QtWidgets.QFrame):
 
         # hover para estrella
         self.setMouseTracking(True)
+
+    def anchor_widget(self) -> QtWidgets.QWidget:
+        """Widget de anclaje del popover (debajo del botón de play)."""
+        return self.btnPlay
 
     # hover para mostrar/ocultar ☆ si no es favorito
     def enterEvent(self, e):
@@ -347,6 +522,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.player.setAudioOutput(self.audio_out)
         self.player.mediaStatusChanged.connect(self._on_status)
         self.player.playbackStateChanged.connect(self._on_state)
+        self.player.positionChanged.connect(self._on_position)  # para progreso del popover
 
         # filtros
         self.include_tags = set()
@@ -366,6 +542,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # teclado / selección actual
         self._current_row = None
         self.installEventFilter(self)  # por si llegan al MainWindow
+
+        # popover flotante
+        self.popover = PlayerPopover(self)
+        # Reposicionar popover en scroll/resize para que permanezca “pegado”
+        self.scroll.verticalScrollBar().valueChanged.connect(self._reposition_popover)
+        self.scroll.horizontalScrollBar().valueChanged.connect(self._reposition_popover)
+        self.resizeEvent = self._wrap_resize(self.resizeEvent)
 
     # ---------- UI ----------
     def _build_ui(self):
@@ -451,6 +634,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.samples = []
         for p in self._collect_files():
             meta = parse_from_filename(p.name)
+            peaks, duration, sample_rate, bit_depth = read_pcm_waveform(p)
+            duration_ms = int(duration * 1000)
             tags_flat = list(meta["genres"] + meta["generals"] + meta["specifics"])
             if meta["key"]:  # solo si hay key real
                 tags_flat.append(meta["key"])
@@ -460,6 +645,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "genres": meta["genres"], "generals": meta["generals"], "specifics": meta["specifics"],
                 "title": meta["title"], "key": meta["key"],
                 "haystack": hay, "tagset": set(tags_flat),
+                "peaks": peaks, "duration_ms": duration_ms,
+                "sample_rate": sample_rate, "bit_depth": bit_depth,
             }
             row = SampleRow(info, is_fav=(p.name in self.favorites))
             row.playClicked.connect(self._toggle_play_row)
@@ -546,22 +733,37 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- reproducción / navegación ----------
     def _ensure_visible(self, row: QtWidgets.QWidget):
-        # Mejora de "sensación": al navegar, asegurar visibilidad suave
         try:
             self.scroll.ensureWidgetVisible(row, xmargin=0, ymargin=8)
         except Exception:
             pass
 
+    def _reposition_popover(self, *args):
+        # Reposicionar si hay fila actual
+        if self._current_row and self._current_row.isVisible():
+            self.popover._reposition()
+
     def _play_row(self, row: SampleRow):
-        """Reproduce el row dado (si ya estaba otro, lo apaga) y lo asegura visible."""
+        """Reproduce el row dado (si ya estaba otro, lo apaga), muestra/posiciona popover y asegura visibilidad."""
         if self._current_row and self._current_row is not row:
             self._current_row.setPlaying(False)
+
         url = QtCore.QUrl.fromLocalFile(str(row.info["path"]))
         self.player.setSource(url)
         self.player.setPosition(0)
         self.player.play()
         row.setPlaying(True)
         self._current_row = row
+
+        # Configurar popover con datos del archivo
+        peaks = row.info.get("peaks")
+        duration_ms = row.info.get("duration_ms", 0) or 1
+        sr = row.info.get("sample_rate", 0)
+        bd = row.info.get("bit_depth", 0)
+        self.popover.setInfo(peaks, sr, bd, duration_ms)
+        self.popover.setProgressMs(0)
+        self.popover.show_for_anchor(row.anchor_widget())
+
         self._ensure_visible(row)
 
     def _toggle_play_row(self, row: SampleRow):
@@ -572,6 +774,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.player.pause(); row.setPlaying(False)
             else:
                 self.player.play(); row.setPlaying(True)
+            # Asegurar popover visible y reanclado
+            self.popover.show_for_anchor(row.anchor_widget())
             self._ensure_visible(row)
             return
         self._play_row(row)
@@ -599,10 +803,15 @@ class MainWindow(QtWidgets.QMainWindow):
         elif st == QtMultimedia.QMediaPlayer.PausedState:
             self._current_row.setPlaying(False)
 
+    def _on_position(self, pos_ms: int):
+        # Actualizar progreso del popover
+        self.popover.setProgressMs(pos_ms)
+
     def _on_status(self, status):
         if status == QtMultimedia.QMediaPlayer.EndOfMedia and self._current_row:
             self._current_row.setPlaying(False)
-            self.player.setPosition(0)  # queda listo para replay
+            self.player.setPosition(0)  # listo para replay
+            self.popover.setProgressMs(0)
 
     # ---------- teclado (global y fluido) ----------
     def eventFilter(self, obj, ev):
@@ -638,6 +847,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 return False
         return False
 
+    def _wrap_resize(self, original_resize_event):
+        def handler(ev):
+            original_resize_event(ev)
+            self._reposition_popover()
+        return handler
+
     # ---------- carpeta ----------
     def change_folder(self):
         dlg = QtWidgets.QFileDialog(self, "Seleccionar carpeta de samples")
@@ -653,6 +868,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._load_samples()
             self._apply_filters()
             self._refresh_tag_suggestions()
+            # Reanclar popover si la fila actual desapareció
+            if not (self._current_row and self._current_row.isVisible()):
+                self._current_row = None
+                self.popover.hide()
 
 # ----------------- bienvenida -----------------
 class WelcomeDialog(QtWidgets.QDialog):
@@ -720,6 +939,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
