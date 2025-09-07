@@ -289,7 +289,7 @@ class TagRow(QtWidgets.QWidget):
         self.menuBtn.setText("…")
         self.menuBtn.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.menuBtn.setMinimumWidth(28)
-               self.menuBtn.setStyleSheet("background:#232327;color:#e5e7eb;border:1px solid #3a3a44;border-radius:8px;padding:2px 10px;")
+        self.menuBtn.setStyleSheet("background:#232327;color:#e5e7eb;border:1px solid #3a3a44;border-radius:8px;padding:2px 10px;")
         self.menuBtn.clicked.connect(self._open_menu)
 
     def setData(self, tags_with_count, ignored=set()):
@@ -720,6 +720,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
