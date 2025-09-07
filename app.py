@@ -1,4 +1,4 @@
-# app.py (popover de reproductor con onda flotante, ↑/↓ fluido, click en fila, drag&drop, y etiquetas de sample/bit)
+# app.py (filtros Key/BPM/Tipo al estilo de las capturas, parsing ONESHOT/LOOP+BPM, popover de onda flotante que se auto-oculta al pasar el mouse, ↑/↓ fluido, click en fila, y drag&drop)
 import os, re, sys, json, unicodedata, contextlib, wave
 from pathlib import Path
 from collections import Counter
@@ -42,10 +42,23 @@ def strip_accents_lower(s: str) -> str:
 
 def parse_from_filename(filename: str):
     """
-    GENERO_trap_hiphop_X_drums_X_clap_snare_X_SQUISH_KEY_NO_.wav
-    -> genres=['trap','hiphop'], generals=['drums'], specifics=['clap','snare'], title='SQUISH', key=''
+    NUEVO FORMATO
+    - ONESHOT_GENERO_house_X_drums_X_clap_snare_X_JAUS_KEY_NO_BPM_NO
+    - LOOP_GENERO_house_X_drums_X_clap_snare_X_JAUS_KEY_NO_BPM_120
+
+    Mantiene compat con el formato viejo (sin ONESHOT/LOOP/BPM_)
     """
     base = re.sub(r"\.[^.]+$", "", filename)
+
+    # tipo (oneshot/loop) por prefijo
+    sample_type = ""
+    if base.upper().startswith("ONESHOT_"):
+        sample_type = "oneshot"
+        base = base[len("ONESHOT_"):]
+    elif base.upper().startswith("LOOP_"):
+        sample_type = "loop"
+        base = base[len("LOOP_"):]
+
     parts = base.split("_X_")
 
     def clean(s):
@@ -61,13 +74,29 @@ def parse_from_filename(filename: str):
     specifics = [t for t in sp.split("_") if t]
 
     tail = "_X_".join(parts[3:]) if len(parts) > 3 else ""
-    title = re.sub(r"_KEY_.+", "", tail).replace("_", " ").strip() or base
-    mkey = re.search(r"_KEY_([^_]+)_?", tail, flags=re.I)
+    # KEY y BPM (si existen)
+    mkey = re.search(r"(?:^|_)KEY_([^_]+)", tail, flags=re.I)
     key = (mkey.group(1).upper() if mkey else "").strip()
-    # Si no hay key o es "NO", quedará vacío (no se mostrará tag)
     key = "" if (not key or key == "NO") else key
 
-    return dict(genres=genres, generals=generals, specifics=specifics, title=title, key=key)
+    mbpm = re.search(r"(?:^|_)BPM_([^_]+)", tail, flags=re.I)
+    bpm = 0
+    if mbpm:
+        bpm_txt = mbpm.group(1).strip()
+        if bpm_txt.upper() != "NO" and bpm_txt.isdigit():
+            bpm = int(bpm_txt)
+
+    # título (antes de KEY/BPM si vienen en el tail)
+    title = tail
+    title = re.sub(r"_KEY_.*", "", title, flags=re.I)
+    title = re.sub(r"_BPM_.*", "", title, flags=re.I)
+    title = title.replace("_", " ").strip() or base
+
+    return dict(
+        sample_type=sample_type,  # 'oneshot' | 'loop' | ''
+        genres=genres, generals=generals, specifics=specifics,
+        title=title, key=key, bpm=bpm
+    )
 
 def read_pcm_waveform(path: Path, peaks=160):
     """
@@ -94,7 +123,6 @@ def read_pcm_waveform(path: Path, peaks=160):
                 wf.setpos(min(i * step, n_frames - 1))
                 frames = wf.readframes(min(step, n_frames - i * step))
                 if sampwidth == 3:  # 24-bit aprox
-                    # Leer solo canal 0 para rapidez (pico relativo)
                     samples = []
                     stride = 3 * n_channels
                     for j in range(0, len(frames) - stride + 1, stride):
@@ -120,8 +148,8 @@ def read_pcm_waveform(path: Path, peaks=160):
 
 # ----------------- UI: chips -----------------
 class TagChip(QtWidgets.QFrame):
-    includeRequested = QtCore.Signal(str)  # clic IZQ o botón ＋
-    excludeRequested = QtCore.Signal(str)  # clic DER o botón −
+    includeRequested = QtCore.Signal(str)
+    excludeRequested = QtCore.Signal(str)
 
     def __init__(self, text: str, tone: str, parent=None):
         super().__init__(parent)
@@ -143,7 +171,6 @@ class TagChip(QtWidgets.QFrame):
         self.lab = QtWidgets.QLabel(text); self.lab.setStyleSheet("border:none;")
         lay.addWidget(self.lab)
 
-        # Botones hover (+ / -)
         self.btnPlus = QtWidgets.QToolButton(); self.btnPlus.setText("＋")
         self.btnPlus.setStyleSheet("QToolButton{background:#14532d;color:#ecfdf5;border:1px solid #166534;border-radius:6px;padding:0 4px;}")
         self.btnPlus.setVisible(False); self.btnPlus.clicked.connect(lambda: self.includeRequested.emit(self.raw_text))
@@ -191,14 +218,10 @@ class SelectedChip(QtWidgets.QWidget):
 
 # ----------------- drag button -----------------
 class DragButton(QtWidgets.QToolButton):
-    """
-    Botón minimalista para arrastrar el archivo al DAW.
-    Inicia un QDrag con 'text/uri-list' (QUrl local).
-    """
     def __init__(self, get_path_callable, parent=None):
         super().__init__(parent)
         self._get_path = get_path_callable
-        self.setText("⠿")  # minimal
+        self.setText("⠿")
         self.setToolTip("Arrastra para soltar este audio en tu DAW")
         self.setCursor(QtGui.QCursor(QtCore.Qt.OpenHandCursor))
         self.setStyleSheet("QToolButton{background:#1a1a1f;color:#9ca3af;border:1px solid #2e2e33;border-radius:8px;} QToolButton:hover{color:#e5e7eb;}")
@@ -215,7 +238,7 @@ class DragButton(QtWidgets.QToolButton):
         else:
             super().mouseMoveEvent(e)
 
-# ----------------- WaveWidget (solo popover) -----------------
+# ----------------- WaveWidget / PlayerPopover -----------------
 class WaveWidget(QtWidgets.QWidget):
     def __init__(self, peaks=None, parent=None):
         super().__init__(parent)
@@ -240,7 +263,6 @@ class WaveWidget(QtWidgets.QWidget):
         cutoff = int(bars * self._progress)
         p.setPen(QtCore.Qt.NoPen)
 
-        # pasado (izq) y futuro (der)
         p.setBrush(QtGui.QColor("#e5e7eb"))
         for i in range(min(cutoff, bars)):
             pk = self._peaks[i] if (self._peaks and i < len(self._peaks)) else 0.35
@@ -253,25 +275,21 @@ class WaveWidget(QtWidgets.QWidget):
             bh = max(1, int(pk * h * 0.92)); y = int(mid - bh / 2)
             p.drawRect(QtCore.QRect(int(i * (w / bars)), y, max(1, int(barW * 0.85)), bh))
 
-# ----------------- Popover del reproductor -----------------
 class PlayerPopover(QtWidgets.QFrame):
+    """Popover hijo de la ventana principal (no se superpone sobre otras apps). Se oculta al pasar el mouse por encima."""
     def __init__(self, parent_window: QtWidgets.QMainWindow):
-        # Top-level (sin padre) para evitar clipping en scroll; stays on top de la app.
-        super().__init__(None)
+        super().__init__(parent_window)
         self._parent_window = parent_window
-        self.setWindowFlags(QtCore.Qt.Tool | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.SubWindow)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setObjectName("PlayerPopover")
 
-        # Sombra suave
         shadow = QtWidgets.QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(24); shadow.setXOffset(0); shadow.setYOffset(8); shadow.setColor(QtGui.QColor(0,0,0,150))
         self.setGraphicsEffect(shadow)
 
-        # Contenido
         wrap = QtWidgets.QVBoxLayout(self)
-        wrap.setContentsMargins(10,10,10,10)
-        wrap.setSpacing(8)
+        wrap.setContentsMargins(10,10,10,10); wrap.setSpacing(8)
 
         body = QtWidgets.QFrame(self)
         body.setStyleSheet("#PlayerPopover > QFrame { background:#101014; border:1px solid #2e2e33; border-radius:12px; }")
@@ -284,25 +302,31 @@ class PlayerPopover(QtWidgets.QFrame):
         self.lblRate = QtWidgets.QLabel("—")
         self.lblBits = QtWidgets.QLabel("—")
         for lbl in (self.lblRate, self.lblBits):
-            lbl.setStyleSheet("color:#cbd5e1;")  # etiquetas sin color llamativo
+            lbl.setStyleSheet("color:#cbd5e1;")
             lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        rightBox.addWidget(self.lblRate)
-        rightBox.addWidget(self.lblBits)
+        rightBox.addWidget(self.lblRate); rightBox.addWidget(self.lblBits)
         inner.addLayout(rightBox, 0)
 
         wrap.addWidget(body)
 
-        # datos
         self._duration_ms = 1
         self._anchor_widget = None
-
-        # tamaño por defecto
         self.resize(560, 96)
+
+        # Ocultar al pasar el mouse por encima "aunque sea una esquinita"
+        self.setMouseTracking(True)
+
+    def enterEvent(self, e):
+        self.hide()  # ocultamos inmediatamente para dejar interactuar con lo de debajo
+        super().enterEvent(e)
+
+    def mouseMoveEvent(self, e):
+        self.hide()
+        super().mouseMoveEvent(e)
 
     def setInfo(self, peaks, sample_rate, bit_depth, duration_ms: int):
         self.wave.setPeaks(peaks)
         self._duration_ms = max(1, duration_ms)
-        # Etiquetas
         rate_txt = f"{sample_rate/1000:.1f} kHz" if sample_rate else "—"
         bits_txt = f"{bit_depth}-bit" if bit_depth else "—"
         self.lblRate.setText(rate_txt)
@@ -313,7 +337,6 @@ class PlayerPopover(QtWidgets.QFrame):
         self.wave.setProgress(frac)
 
     def show_for_anchor(self, anchor: QtWidgets.QWidget):
-        # Guardar anchor para reposicionar con scroll/resize
         self._anchor_widget = anchor
         self._reposition()
         self.show()
@@ -322,25 +345,245 @@ class PlayerPopover(QtWidgets.QFrame):
     def _reposition(self):
         if not self._anchor_widget:
             return
-        # Posición: justo debajo del anchor (botón play del row), con pequeño margen
-        global_pt = self._anchor_widget.mapToGlobal(QtCore.QPoint(0, self._anchor_widget.height()))
-        # margen lateral; asegurar dentro de la ventana
+        # Posición relativa al main window
+        local_pt = self._anchor_widget.mapTo(self._parent_window, QtCore.QPoint(0, self._anchor_widget.height()))
         screen_w = self._parent_window.width()
         desired_w = min(640, max(420, int(screen_w * 0.55)))
         self.resize(desired_w, self.height())
-        x = global_pt.x() - 12  # un poco alineado a la izquierda del botón
-        y = global_pt.y() + 6
-        # Evitar desbordes laterales respecto a la ventana principal
-        win_geom = self._parent_window.frameGeometry()
-        min_x = win_geom.left() + 16
-        max_x = win_geom.right() - self.width() - 16
-        x = max(min_x, min(x, max_x))
+        x = local_pt.x() - 12
+        y = local_pt.y() + 6
+        # Limitar dentro de la ventana
+        x = max(16, min(x, self._parent_window.width() - self.width() - 16))
         self.move(x, y)
+
+# ----------------- Filtros (Key / BPM / Tipo) -----------------
+class AnchorPopover(QtWidgets.QFrame):
+    applied = QtCore.Signal()
+
+    def __init__(self, parent_window: QtWidgets.QMainWindow):
+        super().__init__(parent_window)
+        self._parent_window = parent_window
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.SubWindow)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setObjectName("FilterPopover")
+        self.setStyleSheet("""
+            #FilterPopover > QFrame { background:#18181b; border:1px solid #30303a; border-radius:12px; }
+            QPushButton, QToolButton { background:#232327; color:#e5e7eb; border:1px solid #3a3a44; border-radius:8px; padding:4px 10px; }
+            QPushButton:hover, QToolButton:hover { background:#2a2b31; }
+            QLabel { color:#e5e7eb; }
+            QLineEdit { background:#1a1a1f; border:1px solid #2e2e33; border-radius:8px; padding:4px 8px; color:#e5e7eb; }
+            QTabBar::tab { padding:8px 12px; background:#1a1a1f; color:#e5e7eb; border:1px solid #2e2e33; border-bottom: none; border-top-left-radius:10px; border-top-right-radius:10px; margin-right:6px; }
+            QTabBar::tab:selected { background:#0b2530; border-color:#123043; }
+            QSlider::groove:horizontal { height:6px; background:#2e2e33; border-radius:4px; }
+            QSlider::handle:horizontal { background:#e5e7eb; width:14px; border-radius:7px; margin:-6px 0; }
+        """)
+        self._anchor = None
+
+    def show_for_anchor(self, anchor: QtWidgets.QWidget):
+        self._anchor = anchor
+        self._reposition()
+        self.show()
+        self.raise_()
+
+    def _reposition(self):
+        if not self._anchor: return
+        pt = self._anchor.mapTo(self._parent_window, QtCore.QPoint(0, self._anchor.height()))
+        x = max(8, min(pt.x(), self._parent_window.width() - self.width() - 8))
+        y = pt.y() + 6
+        self.move(x, y)
+
+class KeyFilterPopover(AnchorPopover):
+    changed = QtCore.Signal(set, str)  # (keys, scale)
+
+    def __init__(self, parent_window):
+        super().__init__(parent_window)
+        outer = QtWidgets.QVBoxLayout(self); outer.setContentsMargins(10,10,10,10); outer.setSpacing(8)
+        card = QtWidgets.QFrame(self)
+        lay = QtWidgets.QVBoxLayout(card); lay.setContentsMargins(12,12,12,12); lay.setSpacing(10)
+
+        tabs = QtWidgets.QTabWidget(); tabs.setTabPosition(QtWidgets.QTabWidget.North)
+        flats = QtWidgets.QWidget(); sharps = QtWidgets.QWidget()
+        tabs.addTab(flats, "Flat keys"); tabs.addTab(sharps, "Sharp keys")
+
+        def grid_keys(parent, labels):
+            grid = QtWidgets.QGridLayout(parent); grid.setContentsMargins(0,0,0,0); grid.setSpacing(8)
+            row, col = 0, 0
+            for k in labels:
+                btn = QtWidgets.QToolButton(); btn.setText(k); btn.setCheckable(True)
+                btn.setMinimumWidth(44)
+                btn.clicked.connect(self._emit_change)
+                grid.addWidget(btn, row, col)
+                col += 1
+                if col >= 7: row += 1; col = 0
+
+        grid_keys(flats, ["Db","Eb","Gb","Ab","Bb","C","D","E","F","G","A","B"])
+        grid_keys(sharps, ["C#","D#","F#","G#","A#","C","D","E","F","G","A","B"])
+
+        lay.addWidget(tabs)
+
+        scaleRow = QtWidgets.QHBoxLayout(); scaleRow.setSpacing(8)
+        self.btnMaj = QtWidgets.QPushButton("Major"); self.btnMaj.setCheckable(True)
+        self.btnMin = QtWidgets.QPushButton("Minor"); self.btnMin.setCheckable(True)
+        for b in (self.btnMaj, self.btnMin): b.clicked.connect(self._exclusive_scale)
+        scaleRow.addWidget(self.btnMaj); scaleRow.addWidget(self.btnMin); scaleRow.addStretch(1)
+        lay.addLayout(scaleRow)
+
+        foot = QtWidgets.QHBoxLayout(); foot.addStretch(1)
+        btnClear = QtWidgets.QToolButton(); btnClear.setText("Clear")
+        btnClose = QtWidgets.QPushButton("Close")
+        btnClear.clicked.connect(self._clear)
+        btnClose.clicked.connect(self.hide)
+        foot.addWidget(btnClear); foot.addWidget(btnClose)
+        lay.addLayout(foot)
+
+        outer.addWidget(card)
+        self.resize(360, 240)
+
+    def _exclusive_scale(self):
+        sender = self.sender()
+        if sender is self.btnMaj and self.btnMaj.isChecked():
+            self.btnMin.setChecked(False)
+        elif sender is self.btnMin and self.btnMin.isChecked():
+            self.btnMaj.setChecked(False)
+        self._emit_change()
+
+    def _collect(self):
+        keys = set()
+        for btn in self.findChildren(QtWidgets.QToolButton):
+            if btn.isCheckable() and btn.isChecked() and btn.text() not in ("Clear",):
+                t = btn.text()
+                if t not in ("Clear",):
+                    keys.add(t)
+        scale = "Major" if self.btnMaj.isChecked() else ("Minor" if self.btnMin.isChecked() else "")
+        return keys, scale
+
+    def _emit_change(self):
+        keys, scale = self._collect()
+        self.changed.emit(keys, scale)
+
+    def _clear(self):
+        for btn in self.findChildren(QtWidgets.QToolButton):
+            if btn.isCheckable():
+                btn.setChecked(False)
+        self.btnMaj.setChecked(False); self.btnMin.setChecked(False)
+        self._emit_change()
+
+class BPMFilterPopover(AnchorPopover):
+    changed = QtCore.Signal(int, int, int)  # (min, max, exact or 0)
+
+    def __init__(self, parent_window):
+        super().__init__(parent_window)
+        outer = QtWidgets.QVBoxLayout(self); outer.setContentsMargins(10,10,10,10); outer.setSpacing(8)
+        card = QtWidgets.QFrame(self)
+        lay = QtWidgets.QVBoxLayout(card); lay.setContentsMargins(12,12,12,12); lay.setSpacing(10)
+
+        tabs = QtWidgets.QTabWidget(); tabs.setTabPosition(QtWidgets.QTabWidget.North)
+        self.pageRange = QtWidgets.QWidget(); self.pageExact = QtWidgets.QWidget()
+        tabs.addTab(self.pageRange, "Range"); tabs.addTab(self.pageExact, "Exact")
+
+        # RANGE
+        rlay = QtWidgets.QVBoxLayout(self.pageRange); rlay.setContentsMargins(0,0,0,0); rlay.setSpacing(10)
+        row1 = QtWidgets.QHBoxLayout()
+        self.minSpin = QtWidgets.QSpinBox(); self.minSpin.setRange(1, 400); self.minSpin.setValue(1)
+        self.maxSpin = QtWidgets.QSpinBox(); self.maxSpin.setRange(1, 400); self.maxSpin.setValue(300)
+        self.minSpin.valueChanged.connect(lambda _: self._sync_range(from_spin=True))
+        self.maxSpin.valueChanged.connect(lambda _: self._sync_range(from_spin=True))
+        row1.addWidget(QtWidgets.QLabel("Min")); row1.addWidget(self.minSpin)
+        row1.addSpacing(8); row1.addWidget(QtWidgets.QLabel("—"))
+        row1.addSpacing(8); row1.addWidget(QtWidgets.QLabel("Max")); row1.addWidget(self.maxSpin)
+        rlay.addLayout(row1)
+
+        self.minSlider = QtWidgets.QSlider(QtCore.Qt.Horizontal); self.minSlider.setRange(1, 400); self.minSlider.setValue(1)
+        self.maxSlider = QtWidgets.QSlider(QtCore.Qt.Horizontal); self.maxSlider.setRange(1, 400); self.maxSlider.setValue(300)
+        self.minSlider.valueChanged.connect(lambda _: self._sync_range(from_spin=False))
+        self.maxSlider.valueChanged.connect(lambda _: self._sync_range(from_spin=False))
+        rlay.addWidget(self.minSlider); rlay.addWidget(self.maxSlider)
+
+        # EXACT
+        exLay = QtWidgets.QHBoxLayout(self.pageExact); exLay.setContentsMargins(0,0,0,0); exLay.setSpacing(8)
+        self.exactSpin = QtWidgets.QSpinBox(); self.exactSpin.setRange(1, 400); self.exactSpin.setValue(120)
+        exLay.addWidget(QtWidgets.QLabel("BPM")); exLay.addWidget(self.exactSpin); exLay.addStretch(1)
+
+        foot = QtWidgets.QHBoxLayout(); foot.addStretch(1)
+        btnClear = QtWidgets.QToolButton(); btnClear.setText("Clear")
+        btnSave  = QtWidgets.QPushButton("Save")
+        btnClear.clicked.connect(self._clear)
+        btnSave.clicked.connect(self._apply)
+        foot.addWidget(btnClear); foot.addWidget(btnSave)
+
+        lay.addWidget(tabs); lay.addLayout(foot)
+        outer.addWidget(card)
+        self.resize(360, 220)
+
+    def _sync_range(self, from_spin: bool):
+        if from_spin:
+            self.minSlider.setValue(self.minSpin.value())
+            self.maxSlider.setValue(self.maxSpin.value())
+        else:
+            self.minSpin.setValue(self.minSlider.value())
+            self.maxSpin.setValue(self.maxSlider.value())
+        mn, mx = sorted((self.minSpin.value(), self.maxSpin.value()))
+        self.minSpin.blockSignals(True); self.maxSpin.blockSignals(True)
+        self.minSpin.setValue(mn); self.maxSpin.setValue(mx)
+        self.minSpin.blockSignals(False); self.maxSpin.blockSignals(False)
+
+    def _clear(self):
+        self.minSpin.setValue(1); self.maxSpin.setValue(300); self.exactSpin.setValue(120)
+        self.changed.emit(1, 300, 0)
+
+    def _apply(self):
+        if self.sender():  # save
+            # si estamos en exact, prioridad a exact
+            if self.findChild(QtWidgets.QTabWidget).currentIndex() == 1:
+                self.changed.emit(0, 0, self.exactSpin.value())
+            else:
+                mn, mx = sorted((self.minSpin.value(), self.maxSpin.value()))
+                self.changed.emit(mn, mx, 0)
+        self.hide()
+
+class TypeFilterPopover(AnchorPopover):
+    changed = QtCore.Signal(str)  # 'loop' | 'oneshot' | ''
+
+    def __init__(self, parent_window):
+        super().__init__(parent_window)
+        outer = QtWidgets.QVBoxLayout(self); outer.setContentsMargins(10,10,10,10); outer.setSpacing(8)
+        card = QtWidgets.QFrame(self)
+        lay = QtWidgets.QVBoxLayout(card); lay.setContentsMargins(12,12,12,12); lay.setSpacing(10)
+
+        self.grp = QtWidgets.QButtonGroup(self)
+        self.rbLoops = QtWidgets.QRadioButton("Loops")
+        self.rbOnes  = QtWidgets.QRadioButton("One-Shots")
+        self.grp.addButton(self.rbLoops); self.grp.addButton(self.rbOnes)
+
+        lay.addWidget(self.rbLoops); lay.addWidget(self.rbOnes)
+        lay.addSpacing(10)
+        foot = QtWidgets.QHBoxLayout(); foot.addWidget(QtWidgets.QLabel("")); foot.addStretch(1)
+        btnClear = QtWidgets.QToolButton(); btnClear.setText("Clear")
+        btnClose = QtWidgets.QPushButton("Close")
+        btnClear.clicked.connect(self._clear); btnClose.clicked.connect(self.hide)
+        foot.addWidget(btnClear); foot.addWidget(btnClose)
+        lay.addLayout(foot)
+
+        outer.addWidget(card)
+        self.resize(280, 160)
+
+    def _clear(self):
+        self.grp.setExclusive(False)
+        self.rbLoops.setChecked(False); self.rbOnes.setChecked(False)
+        self.grp.setExclusive(True)
+        self.changed.emit("")
+
+    def mouseReleaseEvent(self, e):
+        super().mouseReleaseEvent(e)
+        if self.rbLoops.isChecked():
+            self.changed.emit("loop"); self.hide()
+        elif self.rbOnes.isChecked():
+            self.changed.emit("oneshot"); self.hide()
 
 # ----------------- fila -----------------
 class SampleRow(QtWidgets.QFrame):
-    playClicked = QtCore.Signal(object)      # self
-    starToggled = QtCore.Signal(object)      # self
+    playClicked = QtCore.Signal(object)
+    starToggled = QtCore.Signal(object)
     tagInclude  = QtCore.Signal(str)
     tagExclude  = QtCore.Signal(str)
 
@@ -352,16 +595,14 @@ class SampleRow(QtWidgets.QFrame):
         self.setObjectName("SampleRow")
         self._apply_style()
 
-        # DRAG
         self.btnDrag = DragButton(lambda: self.info["path"])
         self.btnDrag.setFixedWidth(40)
-        # PLAY
+
         self.btnPlay = QtWidgets.QPushButton("▶")
         self.btnPlay.setFixedWidth(40)
         self.btnPlay.clicked.connect(lambda: self.playClicked.emit(self))
         self.btnPlay.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
 
-        # TAGS
         chipsL = QtWidgets.QHBoxLayout(); chipsL.setContentsMargins(0,0,0,0); chipsL.setSpacing(6)
         for g in info["genres"]:
             c = TagChip(g, "blue");   c.includeRequested.connect(self.tagInclude); c.excludeRequested.connect(self.tagExclude); chipsL.addWidget(c)
@@ -369,28 +610,28 @@ class SampleRow(QtWidgets.QFrame):
             c = TagChip(g, "indigo"); c.includeRequested.connect(self.tagInclude); c.excludeRequested.connect(self.tagExclude); chipsL.addWidget(c)
         for s in info["specifics"]:
             c = TagChip(s, "green");  c.includeRequested.connect(self.tagInclude); c.excludeRequested.connect(self.tagExclude); chipsL.addWidget(c)
-        if info["key"]:  # <-- si no hay key, NO se muestra
+        if info["key"]:
             ck = TagChip(info["key"], "violet"); ck.includeRequested.connect(self.tagInclude); ck.excludeRequested.connect(self.tagExclude); chipsL.addWidget(ck)
 
         chipsW = QtWidgets.QWidget(); chipsW.setStyleSheet("background:transparent;")
         ch = QtWidgets.QHBoxLayout(chipsW); ch.setContentsMargins(0,0,0,0); ch.setSpacing(6); ch.addLayout(chipsL); ch.addStretch(1)
 
-        # NOMBRE (clic en nombre o zona de fondo -> play/pausa)
         self.nameLbl = QtWidgets.QLabel(info["title"]); self.nameLbl.setStyleSheet("color:#e5e7eb;")
         self.nameLbl.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.nameLbl.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
         self.nameLbl.mousePressEvent = lambda e: (self.playClicked.emit(self), e.accept())
 
-        # STAR
+        self.metaLbl = QtWidgets.QLabel(self._meta_text()); self.metaLbl.setStyleSheet("color:#9ca3af;")
+        self.metaLbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+
         self.btnStar = QtWidgets.QToolButton()
         self.btnStar.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
         self._sync_star_icon()
         self.btnStar.clicked.connect(self._toggle_star)
         self._update_star_visibility(show_hover=False)
 
-        # LADO IZQ (tags + nombre + estrella). Clic en el fondo también hace play/pausa.
         left = QtWidgets.QHBoxLayout(); left.setContentsMargins(0,0,0,0); left.setSpacing(8)
-        left.addWidget(chipsW); left.addWidget(self.nameLbl, 1); left.addWidget(self.btnStar)
+        left.addWidget(chipsW); left.addWidget(self.nameLbl, 1); left.addWidget(self.metaLbl, 0); left.addWidget(self.btnStar)
         leftW = QtWidgets.QWidget(); leftW.setStyleSheet("background:transparent;"); leftW.setLayout(left)
         leftW.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
         leftW.mousePressEvent = lambda e: (self.playClicked.emit(self), e.accept())
@@ -403,14 +644,19 @@ class SampleRow(QtWidgets.QFrame):
         grid.addWidget(leftW, 0, 2)
         grid.setColumnStretch(2, 1)
 
-        # hover para estrella
         self.setMouseTracking(True)
 
+    def _meta_text(self):
+        pieces = []
+        if self.info.get("sample_type"):
+            pieces.append(self.info["sample_type"])
+        if self.info.get("bpm"):
+            pieces.append(f'{self.info["bpm"]} BPM')
+        return " · ".join(pieces)
+
     def anchor_widget(self) -> QtWidgets.QWidget:
-        """Widget de anclaje del popover (debajo del botón de play)."""
         return self.btnPlay
 
-    # hover para mostrar/ocultar ☆ si no es favorito
     def enterEvent(self, e):
         self._update_star_visibility(show_hover=True)
         super().enterEvent(e)
@@ -431,9 +677,9 @@ class SampleRow(QtWidgets.QFrame):
 
     def _update_star_visibility(self, show_hover: bool):
         if self.isFav:
-            self.btnStar.setVisible(True)   # ★ siempre visible
+            self.btnStar.setVisible(True)
         else:
-            self.btnStar.setVisible(show_hover)  # ☆ solo en hover
+            self.btnStar.setVisible(show_hover)
 
     def _toggle_star(self):
         self.isFav = not self.isFav
@@ -476,15 +722,13 @@ class TagRow(QtWidgets.QWidget):
     def _rebuild(self):
         while self.wrap.count():
             it = self.wrap.takeAt(0)
-            if it.widget(): it.widget().deleteLater()
-
         fm = self.fontMetrics()
         menu_w = self.menuBtn.sizeHint().width() + 6
         avail = max(0, self.width() - menu_w)
         used = 0; shown = []
 
         for tag, cnt in self._tags:
-            chip_width = fm.horizontalAdvance(tag) + 22 + 26  # texto + padding + botones hover
+            chip_width = fm.horizontalAdvance(tag) + 22 + 26
             if used + chip_width > avail:
                 break
             btn = TagChip(tag, "gray")
@@ -522,40 +766,48 @@ class MainWindow(QtWidgets.QMainWindow):
         self.player.setAudioOutput(self.audio_out)
         self.player.mediaStatusChanged.connect(self._on_status)
         self.player.playbackStateChanged.connect(self._on_state)
-        self.player.positionChanged.connect(self._on_position)  # para progreso del popover
+        self.player.positionChanged.connect(self._on_position)
 
-        # filtros
+        # filtros de búsqueda
+        self.filter_keys = set()
+        self.filter_scale = ""           # "Major" | "Minor" | ""
+        self.filter_type  = ""           # "loop" | "oneshot" | ""
+        self.filter_bpm_min = 1
+        self.filter_bpm_max = 300
+        self.filter_bpm_exact = 0        # 0 = desactivado
+
+        # filtros de texto/etiquetas
         self.include_tags = set()
         self.exclude_tags = set()
         self.search_tokens = []
 
-        # favoritos
         cfg = load_config(); self.favorites = set(cfg.get("favorites", []))
 
-        # UI
         self._build_ui()
         self._load_samples()
         self._apply_filters()
         self._refresh_tag_suggestions()
         QtCore.QTimer.singleShot(0, self._refresh_tag_suggestions)
 
-        # teclado / selección actual
         self._current_row = None
-        self.installEventFilter(self)  # por si llegan al MainWindow
+        self.installEventFilter(self)
 
-        # popover flotante
+        # popover flotante de reproductor
         self.popover = PlayerPopover(self)
-        # Reposicionar popover en scroll/resize para que permanezca “pegado”
         self.scroll.verticalScrollBar().valueChanged.connect(self._reposition_popover)
         self.scroll.horizontalScrollBar().valueChanged.connect(self._reposition_popover)
         self.resizeEvent = self._wrap_resize(self.resizeEvent)
+
+        # popovers de filtros
+        self.keyPop = KeyFilterPopover(self); self.keyPop.changed.connect(self._on_key_filter_changed)
+        self.bpmPop = BPMFilterPopover(self); self.bpmPop.changed.connect(self._on_bpm_filter_changed)
+        self.typePop = TypeFilterPopover(self); self.typePop.changed.connect(self._on_type_filter_changed)
 
     # ---------- UI ----------
     def _build_ui(self):
         central = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(central); v.setContentsMargins(16,16,16,8); v.setSpacing(10)
 
-        # override fondo app
         self.setStyleSheet("""
             QMainWindow, QWidget { background-color: #121214; }
             QLineEdit { background:#1a1a1f; border:1px solid #2e2e33; border-radius:10px; padding:6px 10px; color:#e5e7eb; }
@@ -564,14 +816,12 @@ class MainWindow(QtWidgets.QMainWindow):
             QMenuBar::item:selected { background:#1f2024; }
         """)
 
-        # menú -> "Opciones"
         menubar = self.menuBar()
         menubar.setNativeMenuBar(False)
         options = menubar.addMenu("&Opciones")
         act_change = options.addAction("Cambiar carpeta de &samples…")
         act_change.triggered.connect(self.change_folder)
 
-        # botón DONAR a la derecha del menubar
         donate_btn = QtWidgets.QPushButton("Donar")
         donate_btn.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
         donate_btn.setStyleSheet("QPushButton{background:#16a34a;color:white;border:1px solid #15803d;border-radius:8px;padding:3px 10px;} QPushButton:hover{background:#22c55e;}")
@@ -579,19 +829,26 @@ class MainWindow(QtWidgets.QMainWindow):
         menubar.setCornerWidget(donate_btn, QtCore.Qt.TopRightCorner)
         QtCore.QTimer.singleShot(0, lambda: donate_btn.setFixedHeight(menubar.height()-2))
 
+        # --- Barra de filtros (encima del buscador) ---
+        filterRow = QtWidgets.QHBoxLayout(); filterRow.setContentsMargins(0,0,0,0); filterRow.setSpacing(8)
+        self.btnKey  = QtWidgets.QToolButton(); self.btnKey.setText("Key ▾");  self._style_filter_btn(self.btnKey);  self.btnKey.clicked.connect(lambda: self.keyPop.show_for_anchor(self.btnKey))
+        self.btnBPM  = QtWidgets.QToolButton(); self.btnBPM.setText("BPM ▾");  self._style_filter_btn(self.btnBPM);  self.btnBPM.clicked.connect(lambda: self.bpmPop.show_for_anchor(self.btnBPM))
+        self.btnType = QtWidgets.QToolButton(); self.btnType.setText("One-Shots & Loops ▾"); self._style_filter_btn(self.btnType); self.btnType.clicked.connect(lambda: self.typePop.show_for_anchor(self.btnType))
+        filterRow.addWidget(self.btnKey, 0); filterRow.addWidget(self.btnBPM, 0); filterRow.addWidget(self.btnType, 0); filterRow.addStretch(1)
+        v.addLayout(filterRow)
+
         # buscador
         self.search = QtWidgets.QLineEdit()
-        self.search.setPlaceholderText("Buscar (tags, nombre o key)…")
+        self.search.setPlaceholderText("Buscar (tags, nombre)…")
         self.search.textChanged.connect(self._on_search_text)
         v.addWidget(self.search)
 
-        # filtros activos
+        # filtros activos (include/exclude)
         self.activeWrap = QtWidgets.QHBoxLayout()
         self.activeWrap.setContentsMargins(0,0,0,0); self.activeWrap.setSpacing(6)
         activeW = QtWidgets.QWidget(); activeW.setLayout(self.activeWrap)
         v.addWidget(activeW)
 
-        # fila sugeridos + contador
         row = QtWidgets.QHBoxLayout(); row.setContentsMargins(0,0,0,0); row.setSpacing(10)
         self.tagRow = TagRow()
         self.tagRow.includeRequested.connect(self._include_tag)
@@ -605,12 +862,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scroll = QtWidgets.QScrollArea(); self.scroll.setWidgetResizable(True)
         self.listHost = QtWidgets.QWidget()
         self.listLayout = QtWidgets.QVBoxLayout(self.listHost)
-        self.listLayout.setContentsMargins(0,0,0,0)
-        self.listLayout.setSpacing(8)
+        self.listLayout.setContentsMargins(0,0,0,0); self.listLayout.setSpacing(8)
         self.scroll.setWidget(self.listHost)
         v.addWidget(self.scroll, 1)
 
-        # footer
         footer = QtWidgets.QLabel("© 2025 Gabriel Golker")
         footer.setAlignment(QtCore.Qt.AlignHCenter)
         footer.setStyleSheet("color:#9ca3af; padding: 8px 0;")
@@ -618,6 +873,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.setCentralWidget(central)
         self.resize(1180, 760)
+
+    def _style_filter_btn(self, btn: QtWidgets.QToolButton):
+        btn.setStyleSheet("""
+            QToolButton { background:#1a1a1f; color:#e5e7eb; border:1px solid #2e2e33; border-radius:12px; padding:6px 12px; }
+            QToolButton:hover { background:#202027; }
+        """)
+        btn.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
 
     # ---------- carga ----------
     def _collect_files(self):
@@ -637,13 +899,18 @@ class MainWindow(QtWidgets.QMainWindow):
             peaks, duration, sample_rate, bit_depth = read_pcm_waveform(p)
             duration_ms = int(duration * 1000)
             tags_flat = list(meta["genres"] + meta["generals"] + meta["specifics"])
-            if meta["key"]:  # solo si hay key real
+            if meta["key"]:
                 tags_flat.append(meta["key"])
+            if meta["sample_type"]:
+                tags_flat.append(meta["sample_type"])
+            if meta["bpm"]:
+                tags_flat.append(str(meta["bpm"]))
             hay = strip_accents_lower(" ".join(tags_flat + [meta["title"], p.name]))
             info = {
                 "path": p, "filename": p.name,
                 "genres": meta["genres"], "generals": meta["generals"], "specifics": meta["specifics"],
                 "title": meta["title"], "key": meta["key"],
+                "sample_type": meta["sample_type"], "bpm": meta["bpm"],
                 "haystack": hay, "tagset": set(tags_flat),
                 "peaks": peaks, "duration_ms": duration_ms,
                 "sample_rate": sample_rate, "bit_depth": bit_depth,
@@ -662,13 +929,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if row.isFav: self.favorites.add(name)
         else: self.favorites.discard(name)
         cfg = load_config(); cfg["favorites"] = sorted(self.favorites); save_config(cfg)
-        self._apply_filters()        # reordena
+        self._apply_filters()
 
-    # ---------- filtros ----------
+    # ---------- filtros (texto/tags) ----------
     def _on_search_text(self, text: str):
         self.search_tokens = [strip_accents_lower(t) for t in text.strip().split() if t]
-        self._apply_filters()
-        self._refresh_tag_suggestions()
+        self._apply_filters(); self._refresh_tag_suggestions()
 
     def _include_tag(self, tag: str):
         self.exclude_tags.discard(tag); self.include_tags.add(tag)
@@ -692,15 +958,71 @@ class MainWindow(QtWidgets.QMainWindow):
             chip = SelectedChip(t, negate=True);  chip.removed.connect(self._remove_tag); self.activeWrap.addWidget(chip)
         self.activeWrap.addStretch(1)
 
+    # ---------- filtros (Key/BPM/Tipo) ----------
+    def _on_key_filter_changed(self, keys: set, scale: str):
+        self.filter_keys = set(keys)
+        self.filter_scale = scale or ""
+        txt = "Key ▾" if not self.filter_keys else f"Key ({', '.join(sorted(self.filter_keys))}) ▾"
+        self.btnKey.setText(txt)
+        self._apply_filters()
+
+    def _on_bpm_filter_changed(self, mn: int, mx: int, exact: int):
+        if exact:
+            self.filter_bpm_exact = exact
+            self.filter_bpm_min, self.filter_bpm_max = 1, 400
+            self.btnBPM.setText(f"BPM ({exact}) ▾")
+        else:
+            self.filter_bpm_exact = 0
+            self.filter_bpm_min, self.filter_bpm_max = mn, mx
+            if mn == 1 and mx == 300:
+                self.btnBPM.setText("BPM ▾")
+            else:
+                self.btnBPM.setText(f"BPM ({mn}-{mx}) ▾")
+        self._apply_filters()
+
+    def _on_type_filter_changed(self, t: str):
+        self.filter_type = t or ""
+        if not t:
+            self.btnType.setText("One-Shots & Loops ▾")
+        else:
+            label = "Loops" if t == "loop" else "One-Shots"
+            self.btnType.setText(f"One-Shots & Loops ({label}) ▾")
+        self._apply_filters()
+
+    # ---------- aplicación de filtros y tags sugeridos ----------
     def _apply_filters(self):
         visible_count = 0
         for i, row in enumerate(self.rows):
             s = self.samples[i]
             visible = True
+
+            # texto
             for tok in self.search_tokens:
                 if tok not in s["haystack"]: visible = False; break
+
+            # include/exclude tags
             if visible and self.include_tags and not self.include_tags.issubset(s["tagset"]): visible = False
             if visible and self.exclude_tags and self.exclude_tags.intersection(s["tagset"]): visible = False
+
+            # tipo
+            if visible and self.filter_type and s.get("sample_type") != self.filter_type:
+                visible = False
+
+            # key (coincidencia exacta con cualquiera de los seleccionados)
+            if visible and self.filter_keys:
+                if not s.get("key") or s["key"] not in self.filter_keys:
+                    visible = False
+
+            # BPM
+            bpm = int(s.get("bpm") or 0)
+            if visible and self.filter_bpm_exact:
+                if bpm != self.filter_bpm_exact:
+                    visible = False
+            elif visible:
+                # si el archivo no trae BPM (bpm=0), lo dejamos pasar solo si el rango es completo
+                if bpm and not (self.filter_bpm_min <= bpm <= self.filter_bpm_max):
+                    visible = False
+
             row.setVisible(visible)
             if visible: visible_count += 1
 
@@ -717,7 +1039,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.listLayout.addWidget(r)
         self.listLayout.addStretch(1)
 
-        # contador
         self.resLbl.setText(f"{visible_count} resultado" + ("" if visible_count == 1 else "s"))
 
     def _refresh_tag_suggestions(self):
@@ -739,12 +1060,10 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
     def _reposition_popover(self, *args):
-        # Reposicionar si hay fila actual
         if self._current_row and self._current_row.isVisible():
             self.popover._reposition()
 
     def _play_row(self, row: SampleRow):
-        """Reproduce el row dado (si ya estaba otro, lo apaga), muestra/posiciona popover y asegura visibilidad."""
         if self._current_row and self._current_row is not row:
             self._current_row.setPlaying(False)
 
@@ -755,7 +1074,6 @@ class MainWindow(QtWidgets.QMainWindow):
         row.setPlaying(True)
         self._current_row = row
 
-        # Configurar popover con datos del archivo
         peaks = row.info.get("peaks")
         duration_ms = row.info.get("duration_ms", 0) or 1
         sr = row.info.get("sample_rate", 0)
@@ -767,34 +1085,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ensure_visible(row)
 
     def _toggle_play_row(self, row: SampleRow):
-        """Play/Pausa si es el mismo; si es otro, empieza a reproducirlo."""
         if self._current_row is row:
             st = self.player.playbackState()
             if st == QtMultimedia.QMediaPlayer.PlayingState:
                 self.player.pause(); row.setPlaying(False)
             else:
                 self.player.play(); row.setPlaying(True)
-            # Asegurar popover visible y reanclado
             self.popover.show_for_anchor(row.anchor_widget())
             self._ensure_visible(row)
             return
         self._play_row(row)
 
     def _move_selection(self, delta: int):
-        """
-        Mueve a la fila visible anterior/siguiente y **reproduce automáticamente**.
-        Primer ↓/↑: si no hay fila actual, toma la primera/última visible para una sensación inmediata.
-        """
         visible_rows = [r for r in self.rows if r.isVisible()]
-        if not visible_rows:
-            return
+        if not visible_rows: return
         if self._current_row is None or self._current_row not in visible_rows:
             target = visible_rows[0] if delta >= 0 else visible_rows[-1]
         else:
             idx = visible_rows.index(self._current_row)
             idx = max(0, min(len(visible_rows)-1, idx + delta))
             target = visible_rows[idx]
-        self._play_row(target)  # <- SIEMPRE reproducir
+        self._play_row(target)
 
     def _on_state(self, st):
         if not self._current_row: return
@@ -804,31 +1115,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_row.setPlaying(False)
 
     def _on_position(self, pos_ms: int):
-        # Actualizar progreso del popover
         self.popover.setProgressMs(pos_ms)
 
     def _on_status(self, status):
         if status == QtMultimedia.QMediaPlayer.EndOfMedia and self._current_row:
             self._current_row.setPlaying(False)
-            self.player.setPosition(0)  # listo para replay
+            self.player.setPosition(0)
             self.popover.setProgressMs(0)
 
-    # ---------- teclado (global y fluido) ----------
+    # ---------- teclado ----------
     def eventFilter(self, obj, ev):
         if ev.type() == QtCore.QEvent.KeyPress:
             key = ev.key()
             focus = QtWidgets.QApplication.focusWidget()
             is_text = isinstance(focus, (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit))
 
-            # Navegación fluida: interceptamos SIEMPRE ↑/↓ para moverse y reproducir
             if key == QtCore.Qt.Key_Down:
-                self._move_selection(+1)
-                return True  # consumimos para evitar que el ScrollArea “robe” la tecla
+                self._move_selection(+1); return True
             if key == QtCore.Qt.Key_Up:
-                self._move_selection(-1)
-                return True
+                self._move_selection(-1); return True
 
-            # Enter/Espacio: solo si no estás escribiendo en el buscador
             if key in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return):
                 if not is_text:
                     vis = [r for r in self.rows if r.isVisible()]
@@ -868,7 +1174,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._load_samples()
             self._apply_filters()
             self._refresh_tag_suggestions()
-            # Reanclar popover si la fila actual desapareció
             if not (self._current_row and self._current_row.isVisible()):
                 self._current_row = None
                 self.popover.hide()
@@ -931,14 +1236,14 @@ def main():
     samples_dir = Path(cfg["samples_dir"])
     w = MainWindow(samples_dir); w.show()
 
-    # CLAVE para que ↑/↓ se sientan INMEDIATOS en cualquier foco:
-    # instalamos el eventFilter a nivel de aplicación
+    # Manejo global de teclas ↑/↓ para sensación inmediata
     app.installEventFilter(w)
 
     sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
+
 
 
 
