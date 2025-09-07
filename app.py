@@ -69,7 +69,7 @@ def parse_from_filename(filename: str):
     return dict(genres=genres, generals=generals, specifics=specifics, title=title, key=key)
 
 def read_pcm_waveform(path: Path, peaks=WAVE_PEAKS):
-    """Onda + meta para WAV PCM; otros formatos → (None, 0.0, None, None)."""
+    """Devuelve (peaks, duration, samplerate, bitdepth) para WAV PCM. Otros => (None, 0.0, None, None)."""
     try:
         if path.suffix.lower() not in {".wav"}:
             return None, 0.0, None, None
@@ -80,7 +80,7 @@ def read_pcm_waveform(path: Path, peaks=WAVE_PEAKS):
             sampwidth  = wf.getsampwidth()
             duration   = n_frames / float(framerate) if framerate else 0.0
             bit_depth  = sampwidth * 8
-            # picos
+
             blocks = peaks
             step = max(1, n_frames // blocks)
             import struct
@@ -90,12 +90,11 @@ def read_pcm_waveform(path: Path, peaks=WAVE_PEAKS):
                 wf.setpos(min(i * step, n_frames - 1))
                 frames = wf.readframes(min(step, n_frames - i * step))
                 fmt_char = {1:"b", 2:"h", 3:None, 4:"i"}[sampwidth]
-                if fmt_char is None:  # 24-bit aproximado
+                if fmt_char is None:  # 24-bit aprox
                     samples = []
                     frame_size = n_channels * 3
                     for j in range(0, len(frames) - (frame_size - 1), frame_size):
-                        # solo primer canal
-                        chunk = frames[j:j+3]
+                        chunk = frames[j:j+3]  # 1 canal
                         b = int.from_bytes(chunk, "little", signed=True)
                         samples.append(b / float(2**23))
                 else:
@@ -113,8 +112,11 @@ def read_pcm_waveform(path: Path, peaks=WAVE_PEAKS):
 def fmt_duration(seconds: float) -> str:
     return f"{seconds:.2f}s"
 
-def kHz(sr: int | None) -> str:
-    return f"{sr/1000:.0f} kHz" if sr else "—"
+def fmt_khz(sr: int | None) -> str:
+    if not sr: return "—"
+    khz = sr / 1000.0
+    txt = f"{khz:.0f}" if abs(khz - round(khz)) < 1e-6 else f"{khz:.1f}"
+    return f"{txt} kHz"
 
 # ----------------- chips -----------------
 class TagChip(QtWidgets.QFrame):
@@ -141,21 +143,31 @@ class TagChip(QtWidgets.QFrame):
         self.lab = QtWidgets.QLabel(text); self.lab.setStyleSheet("border:none;")
         lay.addWidget(self.lab)
 
-        # Botones hover (+/-)
         self.btnPlus = QtWidgets.QToolButton(); self.btnPlus.setText("＋")
         self.btnPlus.setStyleSheet("QToolButton{background:#14532d;color:#ecfdf5;border:1px solid #166534;border-radius:6px;padding:0 4px;}")
         self.btnPlus.setVisible(False); self.btnPlus.clicked.connect(lambda: self.includeRequested.emit(self.raw_text))
+
         self.btnMinus = QtWidgets.QToolButton(); self.btnMinus.setText("−")
         self.btnMinus.setStyleSheet("QToolButton{background:#7f1d1d;color:#ffe4e6;border:1px solid #991b1b;border-radius:6px;padding:0 4px;}")
         self.btnMinus.setVisible(False); self.btnMinus.clicked.connect(lambda: self.excludeRequested.emit(self.raw_text))
+
         lay.addWidget(self.btnPlus); lay.addWidget(self.btnMinus)
 
-    def enterEvent(self, e): self.btnPlus.setVisible(True); self.btnMinus.setVisible(True); super().enterEvent(e)
-    def leaveEvent(self, e): self.btnPlus.setVisible(False); self.btnMinus.setVisible(False); super().leaveEvent(e)
+    def enterEvent(self, e):
+        self.btnPlus.setVisible(True)
+        self.btnMinus.setVisible(True)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.btnPlus.setVisible(False)
+        self.btnMinus.setVisible(False)
+        super().leaveEvent(e)
 
     def mousePressEvent(self, e: QtGui.QMouseEvent):
-        if e.button() == QtCore.Qt.RightButton: self.excludeRequested.emit(self.raw_text)
-        else: self.includeRequested.emit(self.raw_text)
+        if e.button() == QtCore.Qt.RightButton:
+            self.excludeRequested.emit(self.raw_text)
+        else:
+            self.includeRequested.emit(self.raw_text)
         e.accept()
 
 class SelectedChip(QtWidgets.QWidget):
@@ -169,9 +181,10 @@ class SelectedChip(QtWidgets.QWidget):
              else "background:#3b1111;color:#ffd4d4;border:1px solid #6b1f1f;")
             + " border-radius:10px; padding:2px 8px;"
         )
-        btn = QtWidgets.QToolButton(); btn.setText("×"); btn.setStyleSheet("color:#e5e7eb;")
+        btn = QtWidgets.QToolButton(); btn.setText("×")
         btn.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
         btn.clicked.connect(lambda: self.removed.emit(self.tag))
+        btn.setStyleSheet("color:#e5e7eb;")
         lay = QtWidgets.QHBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(6)
         lay.addWidget(lab); lay.addWidget(btn)
 
@@ -205,15 +218,10 @@ class WaveWidget(QtWidgets.QWidget):
             p.drawRect(QtCore.QRect(int(i * (w / bars)), y, int(barW * 0.9), bh))
 
 class InfoPill(QtWidgets.QFrame):
-    def __init__(self, text: str, tone: str, parent=None):
+    def __init__(self, text: str, parent=None):
         super().__init__(parent)
-        palette = {
-            "green":  "background:#0f3d28;color:#d4ffe3;border:1px solid #1b5e3a;",
-            "violet": "background:#351457;color:#e7ccff;border:1px solid #52227d;",
-            "blue":   "background:#0b2530;color:#b3e4ff;border:1px solid #123043;",
-            "gray":   "background:#232327;color:#d1d5db;border:1px solid #3a3a44;",
-        }[tone]
-        self.setStyleSheet(palette + " border-radius:10px;")
+        # Gris, compacto
+        self.setStyleSheet("background:#232327;color:#d1d5db;border:1px solid #3a3a44;border-radius:10px;")
         lay = QtWidgets.QHBoxLayout(self); lay.setContentsMargins(10,2,10,2); lay.setSpacing(6)
         lab = QtWidgets.QLabel(text); lab.setStyleSheet("border:none;")
         lay.addWidget(lab)
@@ -224,15 +232,19 @@ class PlayerPanel(QtWidgets.QFrame):
         super().__init__(parent)
         self.setObjectName("PlayerPanel")
         self.setStyleSheet("#PlayerPanel{background:#0f0f13;border:1px solid #303039;border-radius:12px;}")
+        self.filePath: Path | None = None
+        self._pressPos = QtCore.QPoint()
+        self._maybeDrag = False
+        self._dragging = False
 
-        # fila de info (derecha)
+        # info (derecha)
         self.infoWrap = QtWidgets.QHBoxLayout()
         self.infoWrap.setContentsMargins(10,8,10,2)
         self.infoWrap.setSpacing(8)
         self.infoWrap.addStretch(1)
-        self.pillRate = InfoPill("Sample rate: —", "green")
-        self.pillDepth = InfoPill("Bit depth: —", "violet")
-        self.pillDur = InfoPill("Duración: —", "blue")
+        self.pillRate = InfoPill("—")
+        self.pillDepth = InfoPill("—")
+        self.pillDur = InfoPill("—")
         self.infoWrap.addWidget(self.pillRate)
         self.infoWrap.addWidget(self.pillDepth)
         self.infoWrap.addWidget(self.pillDur)
@@ -246,13 +258,13 @@ class PlayerPanel(QtWidgets.QFrame):
 
     def setPeaks(self, peaks): self.wave.setPeaks(peaks)
     def setProgress(self, p): self.wave.setProgress(p)
-
-    def setInfo(self, sr: int | None, bd: int | None, dur: float | None):
-        self.pillRate.deleteLater(); self.pillDepth.deleteLater(); self.pillDur.deleteLater()
-        self.pillRate = InfoPill(f"Sample rate: {kHz(sr)}", "green")
-        self.pillDepth = InfoPill(f"Bit depth: {f'{bd}-bit' if bd else '—'}", "violet")
-        self.pillDur = InfoPill(f"Duración: {fmt_duration(dur or 0.0)}", "blue")
-        # reconstruir a la derecha
+    def setInfoValues(self, khz_text: str, depth_text: str, dur_text: str):
+        # reconstruir
+        for w in (self.pillRate, self.pillDepth, self.pillDur):
+            w.setParent(None); w.deleteLater()
+        self.pillRate = InfoPill(khz_text)
+        self.pillDepth = InfoPill(depth_text)
+        self.pillDur = InfoPill(dur_text)
         while self.infoWrap.count():
             it = self.infoWrap.takeAt(0)
             if it.widget(): it.widget().deleteLater()
@@ -261,11 +273,42 @@ class PlayerPanel(QtWidgets.QFrame):
         self.infoWrap.addWidget(self.pillDepth)
         self.infoWrap.addWidget(self.pillDur)
 
+    def setFilePath(self, p: Path | None):
+        self.filePath = p
+
+    # --- drag & drop desde la zona de la onda ---
     def mousePressEvent(self, e: QtGui.QMouseEvent):
         if e.button() == QtCore.Qt.LeftButton:
-            self.toggleRequested.emit(); e.accept()
-        else:
-            super().mousePressEvent(e)
+            self._pressPos = e.pos()
+            self._maybeDrag = True
+            self._dragging = False
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e: QtGui.QMouseEvent):
+        if self._maybeDrag and (e.buttons() & QtCore.Qt.LeftButton):
+            if (e.pos() - self._pressPos).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
+                # inicia drag si hay archivo
+                if self.filePath and self.filePath.exists():
+                    drag = QtGui.QDrag(self)
+                    mime = QtCore.QMimeData()
+                    mime.setUrls([QtCore.QUrl.fromLocalFile(str(self.filePath))])
+                    drag.setMimeData(mime)
+                    # pequeña vista previa
+                    pm = QtGui.QPixmap(140, 30); pm.fill(QtGui.QColor(0,0,0,0))
+                    painter = QtGui.QPainter(pm); painter.setPen(QtGui.QPen(QtGui.QColor("#e5e7eb"))); painter.drawRect(0,0,139,29)
+                    painter.drawText(6,20,"Arrastrar a tu DAW"); painter.end()
+                    drag.setPixmap(pm)
+                    self._dragging = True
+                    drag.exec(QtCore.Qt.CopyAction)
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e: QtGui.QMouseEvent):
+        # si no fue drag => toggle play/pause
+        if e.button() == QtCore.Qt.LeftButton and not self._dragging:
+            self.toggleRequested.emit()
+        self._maybeDrag = False
+        self._dragging = False
+        super().mouseReleaseEvent(e)
 
 # ----------------- fila -----------------
 def _is_inside(widget: QtWidgets.QWidget | None, cls) -> bool:
@@ -413,6 +456,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_row = None
         self.playerPanel = PlayerPanel()
         self.playerPanel.toggleRequested.connect(lambda: self._current_row and self._toggle_play_row(self._current_row))
+        self._reloc_pending = False
 
         # audio
         self.player = QtMultimedia.QMediaPlayer()
@@ -431,9 +475,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._load_samples()
         self._apply_filters()
         self._refresh_tag_suggestions()
-
-        # teclado (instalado a nivel aplicación en main)
-        # self.installEventFilter(self)  # no necesario si se instala en QApplication
+        QtCore.QTimer.singleShot(0, self._refresh_tag_suggestions)  # asegura tags al arrancar
 
     # ---------- UI ----------
     def _build_ui(self):
@@ -613,34 +655,48 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- reproducción / panel ----------
     def _ensure_panel_position(self):
-        # oculta si no hay selección visible
+        # Reposicionamiento diferido para evitar carreras con el layout
+        if self._reloc_pending:
+            return
+        self._reloc_pending = True
+        QtCore.QTimer.singleShot(0, self._relocate_panel)
+
+    def _relocate_panel(self):
+        self._reloc_pending = False
         if not self._current_row or not self._current_row.isVisible():
             self.playerPanel.setVisible(False); self.playerPanel.setParent(None); return
-        # coloca debajo de la fila seleccionada
+
+        # índice de la fila seleccionada en el layout actual
         idx_row = -1
         for i in range(self.listLayout.count()):
             it = self.listLayout.itemAt(i)
-            if it and it.widget() is self._current_row: idx_row = i; break
+            if it and it.widget() is self._current_row:
+                idx_row = i; break
         if idx_row == -1:
             self.playerPanel.setVisible(False); self.playerPanel.setParent(None); return
-        # retirar panel si estaba antes
+
+        # quitar panel si ya estaba insertado en otra posición
         for i in range(self.listLayout.count()):
             it = self.listLayout.itemAt(i)
             if it and it.widget() is self.playerPanel:
                 self.listLayout.takeAt(i); self.playerPanel.setParent(None); break
+
         self.listLayout.insertWidget(idx_row + 1, self.playerPanel)
         self.playerPanel.setVisible(True)
-        # info técnica
+
         inf = self._current_row.info
-        self.playerPanel.setInfo(inf.get("samplerate"), inf.get("bitdepth"), inf.get("duration"))
+        self.playerPanel.setInfoValues(fmt_khz(inf.get("samplerate")),
+                                       f"{inf.get('bitdepth')}-bit" if inf.get("bitdepth") else "—",
+                                       fmt_duration(inf.get("duration") or 0.0))
         self.playerPanel.setPeaks(inf.get("peaks"))
+        self.playerPanel.setFilePath(inf.get("path"))
 
     def _set_selected_row(self, row: SampleRow | None):
         for r in self.rows:
             r.setSelected(r is row)
 
     def _toggle_play_row(self, row: SampleRow):
-        # si es el mismo: alternar play/pause manteniendo selección
+        # mismo row => alternar
         if self._current_row is row:
             st = self.player.playbackState()
             if st == QtMultimedia.QMediaPlayer.PlayingState:
@@ -670,7 +726,7 @@ class MainWindow(QtWidgets.QMainWindow):
             idx = vis.index(self._current_row)
             idx = max(0, min(len(vis)-1, idx + delta))
             target = vis[idx]
-        # reproduce automáticamente y marca selección
+        # reproducir y seleccionar
         if self.player.playbackState() == QtMultimedia.QMediaPlayer.PlayingState and self._current_row and self._current_row is not target:
             self.player.pause(); self._current_row.setPlaying(False)
         self._toggle_play_row(target)
@@ -687,7 +743,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_status(self, status):
         if status == QtMultimedia.QMediaPlayer.EndOfMedia and self._current_row:
-            # conserva selección en azul; listo para replay
             self._current_row.setPlaying(False)
             self.playerPanel.setProgress(0.0)
             self.player.setPosition(0)
@@ -765,7 +820,7 @@ def main():
             sys.exit(0)
     samples_dir = Path(cfg["samples_dir"])
     w = MainWindow(samples_dir); w.show()
-    # captura teclas aunque el foco esté en el buscador
+    # teclas globales
     app.installEventFilter(w)
     sys.exit(app.exec())
 
