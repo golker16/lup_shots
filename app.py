@@ -44,8 +44,7 @@ def strip_accents_lower(s: str) -> str:
 def parse_from_filename(filename: str):
     """
     GENERO_trap_hiphop_X_drums_X_clap_snare_X_SQUISH_KEY_NO_.wav
-      -> genres=['trap','hiphop'], generals=['drums'], specifics=['clap','snare'],
-         title='SQUISH', key=None (si NO)
+      -> genres, generals, specifics, title, key(None si NO)
     """
     base = re.sub(r"\.[^.]+$", "", filename)
     parts = base.split("_X_")
@@ -70,7 +69,7 @@ def parse_from_filename(filename: str):
     return dict(genres=genres, generals=generals, specifics=specifics, title=title, key=key)
 
 def read_pcm_waveform(path: Path, peaks=WAVE_PEAKS):
-    """Onda rápida para WAV PCM; otros formatos → None (sin dependencias externas)."""
+    """Onda para WAV PCM; otros formatos → None (sin deps externas)."""
     try:
         if path.suffix.lower() not in {".wav"}:
             return None, 0.0
@@ -111,8 +110,8 @@ def read_pcm_waveform(path: Path, peaks=WAVE_PEAKS):
 
 # ----------------- chips -----------------
 class TagChip(QtWidgets.QFrame):
-    includeRequested = QtCore.Signal(str)  # clic IZQ o botón ＋
-    excludeRequested = QtCore.Signal(str)  # clic DER o botón −
+    includeRequested = QtCore.Signal(str)
+    excludeRequested = QtCore.Signal(str)
 
     def __init__(self, text: str, tone: str, parent=None):
         super().__init__(parent)
@@ -134,7 +133,6 @@ class TagChip(QtWidgets.QFrame):
         self.lab = QtWidgets.QLabel(text); self.lab.setStyleSheet("border:none;")
         lay.addWidget(self.lab)
 
-        # Botones hover (+ / -)
         self.btnPlus = QtWidgets.QToolButton(); self.btnPlus.setText("＋")
         self.btnPlus.setStyleSheet("QToolButton{background:#14532d;color:#ecfdf5;border:1px solid #166534;border-radius:6px;padding:0 4px;}")
         self.btnPlus.setVisible(False); self.btnPlus.clicked.connect(lambda: self.includeRequested.emit(self.raw_text))
@@ -181,33 +179,6 @@ class SelectedChip(QtWidgets.QWidget):
         lay.addWidget(lab); lay.addWidget(btn)
 
 # ----------------- reproductor (panel debajo) -----------------
-class PlayerPanel(QtWidgets.QFrame):
-    toggleRequested = QtCore.Signal()  # clic en el panel => play/pause
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("PlayerPanel")
-        self.setStyleSheet("#PlayerPanel{background:#0f0f13;border:1px solid #303039;border-radius:12px;}")
-        self.wave = WaveWidget()
-        self.titleLbl = QtWidgets.QLabel(""); self.titleLbl.setStyleSheet("color:#e5e7eb;")
-        top = QtWidgets.QHBoxLayout(); top.setContentsMargins(10,6,10,0); top.addWidget(self.titleLbl); top.addStretch(1)
-        lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(10,6,10,10); lay.setSpacing(6)
-        lay.addLayout(top)
-        lay.addWidget(self.wave)
-        self.setVisible(False)
-
-    def setPeaks(self, peaks): self.wave.setPeaks(peaks)
-    def setProgress(self, p): self.wave.setProgress(p)
-    def setTitle(self, t): self.titleLbl.setText(t)
-
-    def mousePressEvent(self, e: QtGui.QMouseEvent):
-        if e.button() == QtCore.Qt.LeftButton:
-            self.toggleRequested.emit()
-            e.accept()
-        else:
-            super().mousePressEvent(e)
-
-# ----------------- wave -----------------
 class WaveWidget(QtWidgets.QWidget):
     def __init__(self, peaks=None, parent=None):
         super().__init__(parent)
@@ -218,19 +189,12 @@ class WaveWidget(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setStyleSheet("background: transparent;")
         self.setSizePolicy(QtWidgets.QSizePolicy.MinimumExpanding, QtWidgets.QSizePolicy.Fixed)
-
     def setPeaks(self, peaks): self._peaks = peaks or []; self.update()
     def setProgress(self, p): self._progress = max(0.0, min(1.0, p)); self.update()
-
     def paintEvent(self, e):
-        p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.Antialiasing, False)
-        r = self.rect()
-        mid = r.center().y()
-        w = max(1, r.width()); h = r.height()
-        bars = max(1, len(self._peaks))
-        barW = max(1, int(w / bars))
-        cutoff = int(bars * self._progress)
+        p = QtGui.QPainter(self); p.setRenderHint(QtGui.QPainter.Antialiasing, False)
+        r = self.rect(); mid = r.center().y(); w = max(1, r.width()); h = r.height()
+        bars = max(1, len(self._peaks)); barW = max(1, int(w / bars)); cutoff = int(bars * self._progress)
         p.setPen(QtCore.Qt.NoPen)
         p.setBrush(QtGui.QColor("#ffffff"))
         for i in range(min(cutoff, bars)):
@@ -243,7 +207,34 @@ class WaveWidget(QtWidgets.QWidget):
             bh = max(1, int(pk * h * 0.95)); y = int(mid - bh / 2)
             p.drawRect(QtCore.QRect(int(i * (w / bars)), y, int(barW * 0.9), bh))
 
+class PlayerPanel(QtWidgets.QFrame):
+    toggleRequested = QtCore.Signal()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("PlayerPanel")
+        self.setStyleSheet("#PlayerPanel{background:#0f0f13;border:1px solid #303039;border-radius:12px;}")
+        self.wave = WaveWidget()
+        self.titleLbl = QtWidgets.QLabel(""); self.titleLbl.setStyleSheet("color:#e5e7eb;")
+        top = QtWidgets.QHBoxLayout(); top.setContentsMargins(10,6,10,0); top.addWidget(self.titleLbl); top.addStretch(1)
+        lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(10,6,10,10); lay.setSpacing(6)
+        lay.addLayout(top); lay.addWidget(self.wave)
+        self.setVisible(False)
+    def setPeaks(self, peaks): self.wave.setPeaks(peaks)
+    def setProgress(self, p): self.wave.setProgress(p)
+    def setTitle(self, t): self.titleLbl.setText(t)
+    def mousePressEvent(self, e: QtGui.QMouseEvent):
+        if e.button() == QtCore.Qt.LeftButton:
+            self.toggleRequested.emit(); e.accept()
+        else:
+            super().mousePressEvent(e)
+
 # ----------------- fila -----------------
+def _is_inside(widget: QtWidgets.QWidget | None, cls) -> bool:
+    while widget is not None:
+        if isinstance(widget, cls): return True
+        widget = widget.parentWidget()
+    return False
+
 class SampleRow(QtWidgets.QFrame):
     playClicked = QtCore.Signal(object)      # self
     starToggled = QtCore.Signal(object)      # self
@@ -258,13 +249,11 @@ class SampleRow(QtWidgets.QFrame):
         self.setObjectName("SampleRow")
         self._apply_style()
 
-        # PLAY
         self.btnPlay = QtWidgets.QPushButton("▶")
         self.btnPlay.setFixedWidth(40)
         self.btnPlay.clicked.connect(lambda: self.playClicked.emit(self))
         self.btnPlay.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
 
-        # TAGS
         chipsL = QtWidgets.QHBoxLayout(); chipsL.setContentsMargins(0,0,0,0); chipsL.setSpacing(6)
         for g in info["genres"]:
             c = TagChip(g, "blue");   c.includeRequested.connect(self.tagInclude); c.excludeRequested.connect(self.tagExclude); chipsL.addWidget(c)
@@ -277,48 +266,34 @@ class SampleRow(QtWidgets.QFrame):
         chipsW = QtWidgets.QWidget(); chipsW.setStyleSheet("background:transparent;")
         ch = QtWidgets.QHBoxLayout(chipsW); ch.setContentsMargins(0,0,0,0); ch.setSpacing(6); ch.addLayout(chipsL); ch.addStretch(1)
 
-        # NOMBRE
         self.nameLbl = QtWidgets.QLabel(info["title"]); self.nameLbl.setStyleSheet("color:#e5e7eb;")
         self.nameLbl.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
-        # STAR
         self.btnStar = QtWidgets.QToolButton()
         self.btnStar.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
-        self._sync_star_icon()
-        self.btnStar.clicked.connect(self._toggle_star)
-        self._update_star_visibility(False)
+        self._sync_star_icon(); self.btnStar.clicked.connect(self._toggle_star); self._update_star_visibility(False)
 
         left = QtWidgets.QHBoxLayout(); left.setContentsMargins(0,0,0,0); left.setSpacing(8)
         left.addWidget(chipsW); left.addWidget(self.nameLbl, 1); left.addWidget(self.btnStar)
         leftW = QtWidgets.QWidget(); leftW.setStyleSheet("background:transparent;"); leftW.setLayout(left)
 
         grid = QtWidgets.QGridLayout(self)
-        grid.setContentsMargins(10,10,10,10)
-        grid.setHorizontalSpacing(10)
+        grid.setContentsMargins(10,10,10,10); grid.setHorizontalSpacing(10)
         grid.addWidget(self.btnPlay, 0, 0)
         grid.addWidget(leftW, 0, 1)
         grid.setColumnStretch(1, 1)
 
-        # para click en cualquier parte (menos tags/estrella/botón)
         self.setMouseTracking(True)
 
-    # hover estrella
-    def enterEvent(self, e):
-        self._update_star_visibility(True)
-        super().enterEvent(e)
-    def leaveEvent(self, e):
-        self._update_star_visibility(False)
-        super().leaveEvent(e)
+    def enterEvent(self, e): self._update_star_visibility(True);  super().enterEvent(e)
+    def leaveEvent(self, e): self._update_star_visibility(False); super().leaveEvent(e)
 
     def mousePressEvent(self, e: QtGui.QMouseEvent):
         if e.button() == QtCore.Qt.LeftButton:
             child = self.childAt(e.pos())
-            if child in (self.btnStar, self.btnPlay) or isinstance(child, TagChip):
+            if child is self.btnStar or child is self.btnPlay or _is_inside(child, TagChip):
                 return super().mousePressEvent(e)
-            # click en el resto de la fila => play/pause
-            self.playClicked.emit(self)
-            e.accept()
-            return
+            self.playClicked.emit(self); e.accept(); return
         super().mousePressEvent(e)
 
     def _apply_style(self):
@@ -332,16 +307,11 @@ class SampleRow(QtWidgets.QFrame):
         self.btnStar.setToolTip("Quitar de favoritos" if self.isFav else "Marcar como favorito")
 
     def _update_star_visibility(self, hover: bool):
-        if self.isFav:
-            self.btnStar.setVisible(True)
-        else:
-            self.btnStar.setVisible(hover)
+        self.btnStar.setVisible(True if self.isFav else hover)
 
     def _toggle_star(self):
         self.isFav = not self.isFav
-        self._sync_star_icon()
-        self._update_star_visibility(True)
-        self.starToggled.emit(self)
+        self._sync_star_icon(); self._update_star_visibility(True); self.starToggled.emit(self)
 
     def setPlaying(self, v: bool):
         self.isPlaying = v; self.btnPlay.setText("⏸" if v else "▶"); self._apply_style()
@@ -350,41 +320,27 @@ class SampleRow(QtWidgets.QFrame):
 class TagRow(QtWidgets.QWidget):
     includeRequested = QtCore.Signal(str)
     excludeRequested = QtCore.Signal(str)
-
     def __init__(self):
         super().__init__()
-        self._tags = []           # [(tag, count)]
-        self._ignored = set()
-        self._hidden_for_menu = []
+        self._tags = []; self._ignored = set(); self._hidden_for_menu = []
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.setMinimumHeight(28)
-
-        self.wrap = QtWidgets.QHBoxLayout(self)
-        self.wrap.setContentsMargins(0,0,0,0); self.wrap.setSpacing(6)
-
-        self.menuBtn = QtWidgets.QToolButton()
-        self.menuBtn.setText("…")
+        self.wrap = QtWidgets.QHBoxLayout(self); self.wrap.setContentsMargins(0,0,0,0); self.wrap.setSpacing(6)
+        self.menuBtn = QtWidgets.QToolButton(); self.menuBtn.setText("…")
         self.menuBtn.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.menuBtn.setMinimumWidth(28)
         self.menuBtn.setStyleSheet("background:#232327;color:#e5e7eb;border:1px solid #3a3a44;border-radius:8px;padding:2px 10px;")
         self.menuBtn.clicked.connect(self._open_menu)
-
     def setData(self, tags_with_count, ignored=set()):
         self._tags = sorted([t for t in tags_with_count if t[0] not in ignored], key=lambda x: (-x[1], x[0]))
         self._ignored = set(ignored); self._rebuild()
-
     def resizeEvent(self, e): self._rebuild(); super().resizeEvent(e)
-
     def _rebuild(self):
         while self.wrap.count():
             it = self.wrap.takeAt(0)
             if it.widget(): it.widget().deleteLater()
-
-        fm = self.fontMetrics()
-        menu_w = self.menuBtn.sizeHint().width() + 6
-        avail = max(0, self.width() - menu_w)
-        used = 0; shown = []
-
+        fm = self.fontMetrics(); menu_w = self.menuBtn.sizeHint().width() + 6
+        avail = max(0, self.width() - menu_w); used = 0; shown = []
         for tag, cnt in self._tags:
             chip_width = fm.horizontalAdvance(tag) + 22 + 26
             if used + chip_width > avail: break
@@ -393,21 +349,14 @@ class TagRow(QtWidgets.QWidget):
             btn.includeRequested.connect(self.includeRequested.emit)
             btn.excludeRequested.connect(self.excludeRequested.emit)
             self.wrap.addWidget(btn); used += chip_width + 6; shown.append(tag)
-
-        self.wrap.addStretch(1)
-        self.wrap.addWidget(self.menuBtn)
+        self.wrap.addStretch(1); self.wrap.addWidget(self.menuBtn)
         self._hidden_for_menu = [t for t, _ in self._tags if t not in shown]
-
     def _open_menu(self):
         m = QtWidgets.QMenu(self)
         m.setStyleSheet("QMenu{background:#121214;color:#e5e7eb;border:1px solid #2e2e33;} QMenu::item:selected{background:#1f2024;}")
-        if not self._hidden_for_menu:
-            m.addAction("(sin más tags)").setEnabled(False)
+        if not self._hidden_for_menu: m.addAction("(sin más tags)").setEnabled(False)
         for tag in self._hidden_for_menu[:80]:
-            act = QtGui.QAction(tag, m)
-            def trig(checked=False, t=tag): self.includeRequested.emit(t)
-            act.triggered.connect(trig)
-            m.addAction(act)
+            act = QtGui.QAction(tag, m); act.triggered.connect(lambda _, t=tag: self.includeRequested.emit(t)); m.addAction(act)
         m.exec(self.menuBtn.mapToGlobal(QtCore.QPoint(self.menuBtn.width()//2, self.menuBtn.height())))
 
 # ----------------- ventana principal -----------------
@@ -417,6 +366,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Lup Shots")
         self.samples_dir = samples_dir
 
+        # --- definir PRIMERO atributos usados por filtros/panel ---
+        self._current_row = None            # <- evita el AttributeError
+        self.playerPanel = PlayerPanel()    # <- el panel existe antes de _apply_filters
+        self.playerPanel.toggleRequested.connect(lambda: self._current_row and self._toggle_play_row(self._current_row))
+
         # audio
         self.player = QtMultimedia.QMediaPlayer()
         self.audio_out = QtMultimedia.QAudioOutput(); self.audio_out.setVolume(0.9)
@@ -425,12 +379,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.player.mediaStatusChanged.connect(self._on_status)
         self.player.playbackStateChanged.connect(self._on_state)
 
-        # filtros
-        self.include_tags = set()
-        self.exclude_tags = set()
-        self.search_tokens = []
-
-        # favoritos
+        # filtros / favoritos
+        self.include_tags = set(); self.exclude_tags = set(); self.search_tokens = []
         cfg = load_config(); self.favorites = set(cfg.get("favorites", []))
 
         # UI
@@ -440,12 +390,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_tag_suggestions()
         QtCore.QTimer.singleShot(0, self._refresh_tag_suggestions)
 
-        # panel reproductor (debajo de la fila seleccionada)
-        self.playerPanel = PlayerPanel()
-        self.playerPanel.toggleRequested.connect(lambda: self._current_row and self._toggle_play_row(self._current_row))
-
-        # selección actual
-        self._current_row = None
         self.installEventFilter(self)
 
     # ---------- UI ----------
@@ -525,7 +469,6 @@ class MainWindow(QtWidgets.QMainWindow):
             meta = parse_from_filename(p.name)
             peaks, duration = read_pcm_waveform(p)
             tags_flat = list(meta["genres"] + meta["generals"] + meta["specifics"])
-            # key solo si existe
             if meta["key"]: tags_flat.append(meta["key"])
             hay = strip_accents_lower(" ".join(tags_flat + [meta["title"], p.name]))
             info = {
@@ -548,13 +491,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if row.isFav: self.favorites.add(name)
         else: self.favorites.discard(name)
         cfg = load_config(); cfg["favorites"] = sorted(self.favorites); save_config(cfg)
-        self._apply_filters()        # reordena
+        self._apply_filters()
 
     # ---------- filtros ----------
     def _on_search_text(self, text: str):
         self.search_tokens = [strip_accents_lower(t) for t in text.strip().split() if t]
-        self._apply_filters()
-        self._refresh_tag_suggestions()
+        self._apply_filters(); self._refresh_tag_suggestions()
 
     def _include_tag(self, tag: str):
         self.exclude_tags.discard(tag); self.include_tags.add(tag)
@@ -590,13 +532,11 @@ class MainWindow(QtWidgets.QMainWindow):
             row.setVisible(visible)
             if visible: visible_count += 1
 
-        # ordenar visibles: favoritos primero, luego título
         visible_rows = [r for r in self.rows if r.isVisible()]
         hidden_rows  = [r for r in self.rows if not r.isVisible()]
         visible_rows.sort(key=lambda r: (0 if r.info["filename"] in self.favorites else 1,
                                          strip_accents_lower(r.info["title"])))
 
-        # reconstruir layout
         while self.listLayout.count():
             it = self.listLayout.takeAt(0)
             if it.widget(): it.widget().setParent(None)
@@ -604,13 +544,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.listLayout.addWidget(r)
         self.listLayout.addStretch(1)
 
-        # contador
         self.resLbl.setText(f"{visible_count} resultado" + ("" if visible_count == 1 else "s"))
-
-        # recolocar panel si corresponde
         self._ensure_panel_position()
 
-    # sugerencias de tags (sobre visibles)
     def _refresh_tag_suggestions(self):
         freq = Counter()
         for i, row in enumerate(self.rows):
@@ -623,37 +559,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- reproducción / panel ----------
     def _ensure_panel_position(self):
-        # quitar panel previo del layout
-        parent_layout = self.listLayout
-        # si no hay seleccionado o no es visible -> ocultar panel
-        if not self._current_row or not self._current_row.isVisible():
-            self.playerPanel.setVisible(False)
-            self.playerPanel.setParent(None)
-            return
-
-        # buscar índice de la fila seleccionada
+        if not hasattr(self, "_current_row") or self._current_row is None or not self._current_row.isVisible():
+            self.playerPanel.setVisible(False); self.playerPanel.setParent(None); return
         idx_row = -1
-        for i in range(parent_layout.count()):
-            it = parent_layout.itemAt(i)
+        for i in range(self.listLayout.count()):
+            it = self.listLayout.itemAt(i)
             if it and it.widget() is self._current_row:
-                idx_row = i
-                break
+                idx_row = i; break
         if idx_row == -1:
             self.playerPanel.setVisible(False); self.playerPanel.setParent(None); return
-
-        # quitar panel si ya está en el layout en otra posición
-        for i in range(parent_layout.count()):
-            it = parent_layout.itemAt(i)
+        for i in range(self.listLayout.count()):
+            it = self.listLayout.itemAt(i)
             if it and it.widget() is self.playerPanel:
-                parent_layout.takeAt(i); self.playerPanel.setParent(None); break
-
-        parent_layout.insertWidget(idx_row + 1, self.playerPanel)
+                self.listLayout.takeAt(i); self.playerPanel.setParent(None); break
+        self.listLayout.insertWidget(idx_row + 1, self.playerPanel)
         self.playerPanel.setVisible(True)
         self.playerPanel.setTitle(self._current_row.info["title"])
         self.playerPanel.setPeaks(self._current_row.info.get("peaks"))
 
     def _toggle_play_row(self, row: SampleRow):
-        # si es el actual: alternar pausa/reanudar
         if self._current_row is row:
             st = self.player.playbackState()
             if st == QtMultimedia.QMediaPlayer.PlayingState:
@@ -662,19 +586,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.player.play(); row.setPlaying(True)
             else:
                 self.player.setPosition(0); self.player.play(); row.setPlaying(True)
-            self._ensure_panel_position()
-            return
+            self._ensure_panel_position(); return
 
         if self._current_row:
             self._current_row.setPlaying(False)
 
-        # preparar nuevo
         url = QtCore.QUrl.fromLocalFile(str(row.info["path"]))
-        self.player.setSource(url)
-        self.player.setPosition(0)
-        self.player.play()
-        row.setPlaying(True)
-        self._current_row = row
+        self.player.setSource(url); self.player.setPosition(0); self.player.play()
+        row.setPlaying(True); self._current_row = row
         self._ensure_panel_position()
 
     def _move_selection(self, delta: int):
@@ -686,30 +605,23 @@ class MainWindow(QtWidgets.QMainWindow):
             idx = visible_rows.index(self._current_row)
             idx = max(0, min(len(visible_rows)-1, idx + delta))
             target = visible_rows[idx]
-        # si estaba reproduciendo, pausamos el actual y pasamos al target (reproduce)
         if self.player.playbackState() == QtMultimedia.QMediaPlayer.PlayingState and self._current_row:
-            self.player.pause()
-            self._current_row.setPlaying(False)
+            self.player.pause(); self._current_row.setPlaying(False)
         self._toggle_play_row(target)
 
     def _on_state(self, st):
         if not self._current_row: return
-        if st == QtMultimedia.QMediaPlayer.PlayingState:
-            self._current_row.setPlaying(True)
-        elif st == QtMultimedia.QMediaPlayer.PausedState:
-            self._current_row.setPlaying(False)
+        if st == QtMultimedia.QMediaPlayer.PlayingState: self._current_row.setPlaying(True)
+        elif st == QtMultimedia.QMediaPlayer.PausedState: self._current_row.setPlaying(False)
 
     def _on_position(self, pos_ms: int):
         if not self._current_row: return
-        dur = max(1, int(self.player.duration()))
-        p = max(0.0, min(1.0, pos_ms / float(dur)))
+        dur = max(1, int(self.player.duration())); p = max(0.0, min(1.0, pos_ms / float(dur)))
         self.playerPanel.setProgress(p)
 
     def _on_status(self, status):
         if status == QtMultimedia.QMediaPlayer.EndOfMedia and self._current_row:
-            self._current_row.setPlaying(False)
-            self.playerPanel.setProgress(0.0)
-            self.player.setPosition(0)  # queda listo para replay
+            self._current_row.setPlaying(False); self.playerPanel.setProgress(0.0); self.player.setPosition(0)
 
     # ---------- teclado ----------
     def eventFilter(self, obj, ev):
@@ -717,27 +629,21 @@ class MainWindow(QtWidgets.QMainWindow):
             key = ev.key()
             if key == QtCore.Qt.Key_Space:
                 vis = [r for r in self.rows if r.isVisible()]
-                if self._current_row is None and vis:
-                    self._toggle_play_row(vis[0])
-                elif self._current_row:
-                    self._toggle_play_row(self._current_row)
+                if self._current_row is None and vis: self._toggle_play_row(vis[0])
+                elif self._current_row: self._toggle_play_row(self._current_row)
                 return True
             if key in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return):
                 vis = [r for r in self.rows if r.isVisible()]
                 target = self._current_row or (vis[0] if vis else None)
-                if target: self._toggle_play_row(target)
-                return True
-            if key == QtCore.Qt.Key_Down:
-                self._move_selection(+1); return True
-            if key == QtCore.Qt.Key_Up:
-                self._move_selection(-1); return True
+                if target: self._toggle_play_row(target); return True
+            if key == QtCore.Qt.Key_Down: self._move_selection(+1); return True
+            if key == QtCore.Qt.Key_Up:   self._move_selection(-1); return True
         return False
 
     # ---------- carpeta ----------
     def change_folder(self):
         dlg = QtWidgets.QFileDialog(self, "Seleccionar carpeta de samples")
-        dlg.setFileMode(QtWidgets.QFileDialog.Directory)
-        dlg.setOption(QtWidgets.QFileDialog.ShowDirsOnly, True)
+        dlg.setFileMode(QtWidgets.QFileDialog.Directory); dlg.setOption(QtWidgets.QFileDialog.ShowDirsOnly, True)
         dlg.setDirectory(str(self.samples_dir))
         if dlg.exec():
             self.samples_dir = Path(dlg.selectedFiles()[0])
@@ -745,10 +651,7 @@ class MainWindow(QtWidgets.QMainWindow):
             while self.listLayout.count():
                 it = self.listLayout.takeAt(0)
                 if it.widget(): it.widget().deleteLater()
-            self._load_samples()
-            self._apply_filters()
-            self._refresh_tag_suggestions()
-            # ocultar panel hasta seleccionar de nuevo
+            self._load_samples(); self._apply_filters(); self._refresh_tag_suggestions()
             self.playerPanel.setVisible(False); self._current_row = None
 
 # ----------------- bienvenida -----------------
@@ -757,35 +660,22 @@ class WelcomeDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Bienvenido a Lup Shots")
         self.setModal(True); self.setMinimumWidth(520)
-
         title = QtWidgets.QLabel("<b>Bienvenido a Lup Shots</b>")
-        sub   = QtWidgets.QLabel("Selecciona la carpeta donde están (o pondrás) tus shots.")
-        sub.setWordWrap(True)
-
+        sub   = QtWidgets.QLabel("Selecciona la carpeta donde están (o pondrás) tus shots."); sub.setWordWrap(True)
         self.pathEdit = QtWidgets.QLineEdit(str(default_samples_dir()))
         browse = QtWidgets.QPushButton("Examinar…"); browse.clicked.connect(self._browse)
-
         row = QtWidgets.QHBoxLayout(); row.addWidget(self.pathEdit, 1); row.addWidget(browse)
-
         useBtn = QtWidgets.QPushButton("Usar esta carpeta"); useBtn.setDefault(True)
         cancel = QtWidgets.QPushButton("Cancelar")
         useBtn.clicked.connect(self.accept); cancel.clicked.connect(self.reject)
-
         btns = QtWidgets.QHBoxLayout(); btns.addStretch(1); btns.addWidget(cancel); btns.addWidget(useBtn)
-
-        footer = QtWidgets.QLabel("© 2025 Gabriel Golker")
-        footer.setAlignment(QtCore.Qt.AlignHCenter)
-        footer.setStyleSheet("color:#9ca3af; padding-top:8px;")
-
-        lay = QtWidgets.QVBoxLayout(self)
-        lay.addWidget(title); lay.addWidget(sub); lay.addLayout(row); lay.addLayout(btns); lay.addWidget(footer)
-
+        footer = QtWidgets.QLabel("© 2025 Gabriel Golker"); footer.setAlignment(QtCore.Qt.AlignHCenter); footer.setStyleSheet("color:#9ca3af; padding-top:8px;")
+        lay = QtWidgets.QVBoxLayout(self); lay.addWidget(title); lay.addWidget(sub); lay.addLayout(row); lay.addLayout(btns); lay.addWidget(footer)
     def _browse(self):
         dlg = QtWidgets.QFileDialog(self, "Seleccionar carpeta de samples")
         dlg.setFileMode(QtWidgets.QFileDialog.Directory); dlg.setOption(QtWidgets.QFileDialog.ShowDirsOnly, True)
         dlg.setDirectory(self.pathEdit.text())
         if dlg.exec(): self.pathEdit.setText(dlg.selectedFiles()[0])
-
     def selected_path(self) -> Path:
         return Path(self.pathEdit.text().strip() or str(default_samples_dir()))
 
@@ -794,7 +684,6 @@ def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName(APP_NAME); app.setOrganizationName(APP_ORG)
     app.setStyleSheet(qdarkstyle.load_stylesheet(qt_api="pyside6") + "\nQWidget{background-color:#121214;}")
-
     cfg = load_config()
     need_setup = (not cfg.get("first_run_done", False)) or (not Path(cfg.get("samples_dir", "")).exists())
     if need_setup:
@@ -805,11 +694,11 @@ def main():
             cfg["samples_dir"] = str(chosen); cfg["first_run_done"] = True; save_config(cfg)
         else:
             sys.exit(0)
-
     samples_dir = Path(cfg["samples_dir"])
     w = MainWindow(samples_dir); w.show()
     sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
+
 
