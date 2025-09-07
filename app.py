@@ -1,5 +1,5 @@
-# app.py
-import os, re, sys, json, wave, contextlib, unicodedata
+# app.py (refinado según indicaciones)
+import os, re, sys, json, unicodedata
 from pathlib import Path
 from collections import Counter
 
@@ -10,7 +10,6 @@ APP_NAME = "Lup Shots"
 APP_ORG  = "Lup"
 
 VALID_EXTS = {".wav", ".aiff", ".aif", ".mp3", ".flac", ".ogg"}
-WAVE_PEAKS = 160
 
 CONFIG_DIR  = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -44,7 +43,7 @@ def strip_accents_lower(s: str) -> str:
 def parse_from_filename(filename: str):
     """
     GENERO_trap_hiphop_X_drums_X_clap_snare_X_SQUISH_KEY_NO_.wav
-    -> genres=['trap','hiphop'], generals=['drums'], specifics=['clap','snare'], title='SQUISH', key='—'
+    -> genres=['trap','hiphop'], generals=['drums'], specifics=['clap','snare'], title='SQUISH', key=''
     """
     base = re.sub(r"\.[^.]+$", "", filename)
     parts = base.split("_X_")
@@ -65,49 +64,10 @@ def parse_from_filename(filename: str):
     title = re.sub(r"_KEY_.+", "", tail).replace("_", " ").strip() or base
     mkey = re.search(r"_KEY_([^_]+)_?", tail, flags=re.I)
     key = (mkey.group(1).upper() if mkey else "").strip()
-    key = "—" if (not key or key == "NO") else key
+    # Si no hay key o es "NO", quedará vacío (no se mostrará tag)
+    key = "" if (not key or key == "NO") else key
 
     return dict(genres=genres, generals=generals, specifics=specifics, title=title, key=key)
-
-def read_pcm_waveform(path: Path, peaks=WAVE_PEAKS):
-    """Onda rápida para WAV PCM; otros formatos → None (sin dependencias externas)."""
-    try:
-        if path.suffix.lower() not in {".wav"}:
-            return None, 0.0
-        with contextlib.closing(wave.open(str(path), "rb")) as wf:
-            n_channels = wf.getnchannels()
-            n_frames   = wf.getnframes()
-            framerate  = wf.getframerate()
-            sampwidth  = wf.getsampwidth()
-            duration   = n_frames / float(framerate) if framerate else 0.0
-
-            blocks = peaks
-            step = max(1, n_frames // blocks)
-            import struct
-            max_val = float(2 ** (8 * sampwidth - 1))
-            out = []
-            for i in range(blocks):
-                wf.setpos(min(i * step, n_frames - 1))
-                frames = wf.readframes(min(step, n_frames - i * step))
-                fmt_char = {1:"b", 2:"h", 3:None, 4:"i"}[sampwidth]
-                if fmt_char is None:  # 24-bit aprox
-                    samples = []
-                    for j in range(0, len(frames), 3 * n_channels):
-                        chunk = frames[j:j+3]
-                        if len(chunk) < 3: break
-                        b = int.from_bytes(chunk, "little", signed=True)
-                        samples.append(b / float(2**23))
-                else:
-                    fmt = "<" + fmt_char * (len(frames) // sampwidth)
-                    ints = struct.unpack(fmt, frames)
-                    samples = ints[0::n_channels]
-                    samples = [x / (max_val or 1.0) for x in samples]
-                peak = max(abs(min(samples)), max(samples)) if samples else 0.0
-                out.append(peak)
-            mx = max(out) if out else 1.0
-            return [p / (mx or 1.0) for p in out], duration
-    except Exception:
-        return None, 0.0
 
 # ----------------- chips -----------------
 class TagChip(QtWidgets.QFrame):
@@ -180,43 +140,31 @@ class SelectedChip(QtWidgets.QWidget):
         lay = QtWidgets.QHBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(6)
         lay.addWidget(lab); lay.addWidget(btn)
 
-# ----------------- wave -----------------
-class WaveWidget(QtWidgets.QWidget):
-    def __init__(self, peaks=None, parent=None):
+# ----------------- drag button -----------------
+class DragButton(QtWidgets.QToolButton):
+    """
+    Botón minimalista para arrastrar el archivo al DAW.
+    Inicia un QDrag con 'text/uri-list' (QUrl local).
+    """
+    def __init__(self, get_path_callable, parent=None):
         super().__init__(parent)
-        self._peaks = peaks or []
-        self._progress = 0.0
-        self.setMinimumHeight(42)
-        self.setMinimumWidth(24)  # puede comprimirse MUCHO
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
-        self.setStyleSheet("background: transparent;")
-        self.setSizePolicy(QtWidgets.QSizePolicy.MinimumExpanding, QtWidgets.QSizePolicy.Fixed)
+        self._get_path = get_path_callable
+        self.setText("⠿")  # minimal
+        self.setToolTip("Arrastra para soltar este audio en tu DAW")
+        self.setCursor(QtGui.QCursor(QtCore.Qt.OpenHandCursor))
+        self.setStyleSheet("QToolButton{background:#1a1a1f;color:#9ca3af;border:1px solid #2e2e33;border-radius:8px;} QToolButton:hover{color:#e5e7eb;}")
 
-    def setPeaks(self, peaks): self._peaks = peaks or []; self.update()
-    def setProgress(self, p): self._progress = max(0.0, min(1.0, p)); self.update()
-
-    def paintEvent(self, e):
-        p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.Antialiasing, False)
-        r = self.rect()
-        mid = r.center().y()
-        w = max(1, r.width()); h = r.height()
-        bars = max(1, len(self._peaks))
-        barW = max(1, int(w / bars))
-        cutoff = int(bars * self._progress)
-        p.setPen(QtCore.Qt.NoPen)
-
-        p.setBrush(QtGui.QColor("#ffffff"))
-        for i in range(min(cutoff, bars)):
-            pk = self._peaks[i] if i < len(self._peaks) else 0
-            bh = max(1, int(pk * h * 0.95)); y = int(mid - bh / 2)
-            p.drawRect(QtCore.QRect(int(i * (w / bars)), y, int(barW * 0.9), bh))
-
-        p.setBrush(QtGui.QColor("#a1a1aa"))
-        for i in range(cutoff, bars):
-            pk = self._peaks[i] if i < len(self._peaks) else 0
-            bh = max(1, int(pk * h * 0.95)); y = int(mid - bh / 2)
-            p.drawRect(QtCore.QRect(int(i * (w / bars)), y, int(barW * 0.9), bh))
+    def mouseMoveEvent(self, e: QtGui.QMouseEvent):
+        if e.buttons() & QtCore.Qt.LeftButton:
+            path = self._get_path()
+            if not path: return
+            mime = QtCore.QMimeData()
+            mime.setUrls([QtCore.QUrl.fromLocalFile(str(path))])
+            drag = QtGui.QDrag(self)
+            drag.setMimeData(mime)
+            drag.exec(QtCore.Qt.CopyAction)
+        else:
+            super().mouseMoveEvent(e)
 
 # ----------------- fila -----------------
 class SampleRow(QtWidgets.QFrame):
@@ -233,6 +181,9 @@ class SampleRow(QtWidgets.QFrame):
         self.setObjectName("SampleRow")
         self._apply_style()
 
+        # DRAG
+        self.btnDrag = DragButton(lambda: self.info["path"])
+        self.btnDrag.setFixedWidth(40)
         # PLAY
         self.btnPlay = QtWidgets.QPushButton("▶")
         self.btnPlay.setFixedWidth(40)
@@ -247,13 +198,17 @@ class SampleRow(QtWidgets.QFrame):
             c = TagChip(g, "indigo"); c.includeRequested.connect(self.tagInclude); c.excludeRequested.connect(self.tagExclude); chipsL.addWidget(c)
         for s in info["specifics"]:
             c = TagChip(s, "green");  c.includeRequested.connect(self.tagInclude); c.excludeRequested.connect(self.tagExclude); chipsL.addWidget(c)
-        ck = TagChip(info["key"], "violet"); ck.includeRequested.connect(self.tagInclude); ck.excludeRequested.connect(self.tagExclude); chipsL.addWidget(ck)
+        if info["key"]:  # <-- si no hay key, NO se muestra
+            ck = TagChip(info["key"], "violet"); ck.includeRequested.connect(self.tagInclude); ck.excludeRequested.connect(self.tagExclude); chipsL.addWidget(ck)
+
         chipsW = QtWidgets.QWidget(); chipsW.setStyleSheet("background:transparent;")
         ch = QtWidgets.QHBoxLayout(chipsW); ch.setContentsMargins(0,0,0,0); ch.setSpacing(6); ch.addLayout(chipsL); ch.addStretch(1)
 
-        # NOMBRE
+        # NOMBRE (clic en nombre o zona de fondo -> play/pausa)
         self.nameLbl = QtWidgets.QLabel(info["title"]); self.nameLbl.setStyleSheet("color:#e5e7eb;")
         self.nameLbl.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.nameLbl.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        self.nameLbl.mousePressEvent = lambda e: (self.playClicked.emit(self), e.accept())
 
         # STAR
         self.btnStar = QtWidgets.QToolButton()
@@ -262,22 +217,20 @@ class SampleRow(QtWidgets.QFrame):
         self.btnStar.clicked.connect(self._toggle_star)
         self._update_star_visibility(show_hover=False)
 
+        # LADO IZQ (tags + nombre + estrella). Clic en el fondo también hace play/pausa.
         left = QtWidgets.QHBoxLayout(); left.setContentsMargins(0,0,0,0); left.setSpacing(8)
         left.addWidget(chipsW); left.addWidget(self.nameLbl, 1); left.addWidget(self.btnStar)
         leftW = QtWidgets.QWidget(); leftW.setStyleSheet("background:transparent;"); leftW.setLayout(left)
-
-        # WAVE
-        self.wave = WaveWidget(info.get("peaks"))
-        self.wave.setSizePolicy(QtWidgets.QSizePolicy.MinimumExpanding, QtWidgets.QSizePolicy.Fixed)
+        leftW.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        leftW.mousePressEvent = lambda e: (self.playClicked.emit(self), e.accept())
 
         grid = QtWidgets.QGridLayout(self)
         grid.setContentsMargins(10,10,10,10)
         grid.setHorizontalSpacing(10)
-        grid.addWidget(self.btnPlay, 0, 0)
-        grid.addWidget(leftW, 0, 1)
-        grid.addWidget(self.wave, 0, 2)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)  # <- importante: la wave siempre recibe ancho
+        grid.addWidget(self.btnDrag, 0, 0)
+        grid.addWidget(self.btnPlay, 0, 1)
+        grid.addWidget(leftW, 0, 2)
+        grid.setColumnStretch(2, 1)
 
         # hover para estrella
         self.setMouseTracking(True)
@@ -315,9 +268,6 @@ class SampleRow(QtWidgets.QFrame):
 
     def setPlaying(self, v: bool):
         self.isPlaying = v; self.btnPlay.setText("⏸" if v else "▶"); self._apply_style()
-
-    def setProgress(self, p): self.wave.setProgress(p)
-    def setPeaks(self, peaks): self.wave.setPeaks(peaks)
 
 # ----------------- fila de sugeridos -----------------
 class TagRow(QtWidgets.QWidget):
@@ -395,7 +345,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.player = QtMultimedia.QMediaPlayer()
         self.audio_out = QtMultimedia.QAudioOutput(); self.audio_out.setVolume(0.9)
         self.player.setAudioOutput(self.audio_out)
-        self.player.positionChanged.connect(self._on_position)
         self.player.mediaStatusChanged.connect(self._on_status)
         self.player.playbackStateChanged.connect(self._on_state)
 
@@ -414,7 +363,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_tag_suggestions()
         QtCore.QTimer.singleShot(0, self._refresh_tag_suggestions)  # asegura tags al primer show
 
-        # teclado
+        # teclado / selección actual
         self._current_row = None
         self.installEventFilter(self)
 
@@ -434,7 +383,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # menú -> "Opciones"
         menubar = self.menuBar()
-        menubar.setNativeMenuBar(False)  # <-- fuerza barra en ventana (necesario para cornerWidget)
+        menubar.setNativeMenuBar(False)
         options = menubar.addMenu("&Opciones")
         act_change = options.addAction("Cambiar carpeta de &samples…")
         act_change.triggered.connect(self.change_folder)
@@ -502,14 +451,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.samples = []
         for p in self._collect_files():
             meta = parse_from_filename(p.name)
-            peaks, duration = read_pcm_waveform(p)
             tags_flat = list(meta["genres"] + meta["generals"] + meta["specifics"])
-            if meta["key"] != "—": tags_flat.append(meta["key"])
+            if meta["key"]:  # solo si hay key real
+                tags_flat.append(meta["key"])
             hay = strip_accents_lower(" ".join(tags_flat + [meta["title"], p.name]))
             info = {
                 "path": p, "filename": p.name,
                 "genres": meta["genres"], "generals": meta["generals"], "specifics": meta["specifics"],
-                "title": meta["title"], "key": meta["key"], "peaks": peaks, "duration": duration,
+                "title": meta["title"], "key": meta["key"],
                 "haystack": hay, "tagset": set(tags_flat),
             }
             row = SampleRow(info, is_fav=(p.name in self.favorites))
@@ -596,20 +545,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tagRow.setData(tags_with_count, ignored=self.include_tags | self.exclude_tags)
 
     # ---------- reproducción / navegación ----------
-    def _toggle_play_row(self, row: SampleRow):
-        if self._current_row is row:
-            st = self.player.playbackState()
-            if st == QtMultimedia.QMediaPlayer.PlayingState:
-                self.player.pause(); row.setPlaying(False)
-            elif st == QtMultimedia.QMediaPlayer.PausedState:
-                self.player.play(); row.setPlaying(True)
-            else:
-                self.player.setPosition(0); self.player.play(); row.setPlaying(True)
-            return
-
-        if self._current_row:
+    def _play_row(self, row: SampleRow):
+        """Reproduce el row dado (si ya está seleccionado, reinicia si estaba parado)."""
+        if self._current_row and self._current_row is not row:
             self._current_row.setPlaying(False)
-
         url = QtCore.QUrl.fromLocalFile(str(row.info["path"]))
         self.player.setSource(url)
         self.player.setPosition(0)
@@ -617,19 +556,30 @@ class MainWindow(QtWidgets.QMainWindow):
         row.setPlaying(True)
         self._current_row = row
 
+    def _toggle_play_row(self, row: SampleRow):
+        """Play/Pausa si es el mismo; si es otro, empieza a reproducirlo."""
+        if self._current_row is row:
+            st = self.player.playbackState()
+            if st == QtMultimedia.QMediaPlayer.PlayingState:
+                self.player.pause(); row.setPlaying(False)
+            else:
+                # si está pausado o parado, reproducir
+                self.player.play(); row.setPlaying(True)
+            return
+        self._play_row(row)
+
     def _move_selection(self, delta: int):
+        """Mueve a la fila visible anterior/siguiente y **reproduce automáticamente**."""
         visible_rows = [r for r in self.rows if r.isVisible()]
-        if not visible_rows: return
+        if not visible_rows:
+            return
         if self._current_row is None or self._current_row not in visible_rows:
             target = visible_rows[0]
         else:
             idx = visible_rows.index(self._current_row)
             idx = max(0, min(len(visible_rows)-1, idx + delta))
             target = visible_rows[idx]
-        if self.player.playbackState() == QtMultimedia.QMediaPlayer.PlayingState and self._current_row:
-            self.player.pause()
-            self._current_row.setPlaying(False)
-        self._toggle_play_row(target)
+        self._play_row(target)  # <- SIEMPRE reproducir
 
     def _on_state(self, st):
         if not self._current_row: return
@@ -638,17 +588,10 @@ class MainWindow(QtWidgets.QMainWindow):
         elif st == QtMultimedia.QMediaPlayer.PausedState:
             self._current_row.setPlaying(False)
 
-    def _on_position(self, pos_ms: int):
-        if not self._current_row: return
-        dur = max(1, int(self.player.duration()))
-        p = max(0.0, min(1.0, pos_ms / float(dur)))
-        self._current_row.setProgress(p)
-
     def _on_status(self, status):
         if status == QtMultimedia.QMediaPlayer.EndOfMedia and self._current_row:
             self._current_row.setPlaying(False)
-            self._current_row.setProgress(0.0)
-            self.player.setPosition(0)  # queda seleccionado para replay
+            self.player.setPosition(0)  # queda listo para replay
 
     # ---------- teclado ----------
     def eventFilter(self, obj, ev):
@@ -657,7 +600,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if key == QtCore.Qt.Key_Space:
                 vis = [r for r in self.rows if r.isVisible()]
                 if self._current_row is None and vis:
-                    self._toggle_play_row(vis[0])
+                    self._play_row(vis[0])
                 elif self._current_row:
                     self._toggle_play_row(self._current_row)
                 return True
@@ -749,6 +692,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
