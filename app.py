@@ -1,4 +1,4 @@
-# app.py (refinado según indicaciones)
+# app.py (refinado para navegación fluida con ↑/↓, sin waveform, click en fila, y drag&drop)
 import os, re, sys, json, unicodedata
 from pathlib import Path
 from collections import Counter
@@ -289,7 +289,7 @@ class TagRow(QtWidgets.QWidget):
         self.menuBtn.setText("…")
         self.menuBtn.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.menuBtn.setMinimumWidth(28)
-        self.menuBtn.setStyleSheet("background:#232327;color:#e5e7eb;border:1px solid #3a3a44;border-radius:8px;padding:2px 10px;")
+               self.menuBtn.setStyleSheet("background:#232327;color:#e5e7eb;border:1px solid #3a3a44;border-radius:8px;padding:2px 10px;")
         self.menuBtn.clicked.connect(self._open_menu)
 
     def setData(self, tags_with_count, ignored=set()):
@@ -361,11 +361,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._load_samples()
         self._apply_filters()
         self._refresh_tag_suggestions()
-        QtCore.QTimer.singleShot(0, self._refresh_tag_suggestions)  # asegura tags al primer show
+        QtCore.QTimer.singleShot(0, self._refresh_tag_suggestions)
 
         # teclado / selección actual
         self._current_row = None
-        self.installEventFilter(self)
+        self.installEventFilter(self)  # por si llegan al MainWindow
 
     # ---------- UI ----------
     def _build_ui(self):
@@ -545,8 +545,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tagRow.setData(tags_with_count, ignored=self.include_tags | self.exclude_tags)
 
     # ---------- reproducción / navegación ----------
+    def _ensure_visible(self, row: QtWidgets.QWidget):
+        # Mejora de "sensación": al navegar, asegurar visibilidad suave
+        try:
+            self.scroll.ensureWidgetVisible(row, xmargin=0, ymargin=8)
+        except Exception:
+            pass
+
     def _play_row(self, row: SampleRow):
-        """Reproduce el row dado (si ya está seleccionado, reinicia si estaba parado)."""
+        """Reproduce el row dado (si ya estaba otro, lo apaga) y lo asegura visible."""
         if self._current_row and self._current_row is not row:
             self._current_row.setPlaying(False)
         url = QtCore.QUrl.fromLocalFile(str(row.info["path"]))
@@ -555,6 +562,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.player.play()
         row.setPlaying(True)
         self._current_row = row
+        self._ensure_visible(row)
 
     def _toggle_play_row(self, row: SampleRow):
         """Play/Pausa si es el mismo; si es otro, empieza a reproducirlo."""
@@ -563,18 +571,21 @@ class MainWindow(QtWidgets.QMainWindow):
             if st == QtMultimedia.QMediaPlayer.PlayingState:
                 self.player.pause(); row.setPlaying(False)
             else:
-                # si está pausado o parado, reproducir
                 self.player.play(); row.setPlaying(True)
+            self._ensure_visible(row)
             return
         self._play_row(row)
 
     def _move_selection(self, delta: int):
-        """Mueve a la fila visible anterior/siguiente y **reproduce automáticamente**."""
+        """
+        Mueve a la fila visible anterior/siguiente y **reproduce automáticamente**.
+        Primer ↓/↑: si no hay fila actual, toma la primera/última visible para una sensación inmediata.
+        """
         visible_rows = [r for r in self.rows if r.isVisible()]
         if not visible_rows:
             return
         if self._current_row is None or self._current_row not in visible_rows:
-            target = visible_rows[0]
+            target = visible_rows[0] if delta >= 0 else visible_rows[-1]
         else:
             idx = visible_rows.index(self._current_row)
             idx = max(0, min(len(visible_rows)-1, idx + delta))
@@ -593,26 +604,38 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_row.setPlaying(False)
             self.player.setPosition(0)  # queda listo para replay
 
-    # ---------- teclado ----------
+    # ---------- teclado (global y fluido) ----------
     def eventFilter(self, obj, ev):
         if ev.type() == QtCore.QEvent.KeyPress:
             key = ev.key()
-            if key == QtCore.Qt.Key_Space:
-                vis = [r for r in self.rows if r.isVisible()]
-                if self._current_row is None and vis:
-                    self._play_row(vis[0])
-                elif self._current_row:
-                    self._toggle_play_row(self._current_row)
-                return True
-            if key in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return):
-                vis = [r for r in self.rows if r.isVisible()]
-                target = self._current_row or (vis[0] if vis else None)
-                if target: self._toggle_play_row(target)
-                return True
+            focus = QtWidgets.QApplication.focusWidget()
+            is_text = isinstance(focus, (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit))
+
+            # Navegación fluida: interceptamos SIEMPRE ↑/↓ para moverse y reproducir
             if key == QtCore.Qt.Key_Down:
-                self._move_selection(+1); return True
+                self._move_selection(+1)
+                return True  # consumimos para evitar que el ScrollArea “robe” la tecla
             if key == QtCore.Qt.Key_Up:
-                self._move_selection(-1); return True
+                self._move_selection(-1)
+                return True
+
+            # Enter/Espacio: solo si no estás escribiendo en el buscador
+            if key in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return):
+                if not is_text:
+                    vis = [r for r in self.rows if r.isVisible()]
+                    target = self._current_row or (vis[0] if vis else None)
+                    if target: self._toggle_play_row(target)
+                    return True
+                return False
+            if key == QtCore.Qt.Key_Space:
+                if not is_text:
+                    vis = [r for r in self.rows if r.isVisible()]
+                    if self._current_row is None and vis:
+                        self._play_row(vis[0])
+                    elif self._current_row:
+                        self._toggle_play_row(self._current_row)
+                    return True
+                return False
         return False
 
     # ---------- carpeta ----------
@@ -688,11 +711,15 @@ def main():
 
     samples_dir = Path(cfg["samples_dir"])
     w = MainWindow(samples_dir); w.show()
+
+    # CLAVE para que ↑/↓ se sientan INMEDIATOS en cualquier foco:
+    # instalamos el eventFilter a nivel de aplicación
+    app.installEventFilter(w)
+
     sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
-
 
 
 
