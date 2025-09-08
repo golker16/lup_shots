@@ -1,28 +1,14 @@
 # app.py
-# Cambios en esta versión:
-# - ORDEN Y NAVEGACIÓN
-#   • Los favoritos (★) se ordenan primero SIEMPRE dentro de los resultados visibles.
-#   • La navegación con ↑/↓ usa el nuevo orden visible (no el orden original interno).
-#   • Al cambiar favoritos, el orden y la navegación se actualizan de inmediato.
-#   • Al moverse con ↑/↓ se hace STOP del actual y se reproduce el nuevo inmediatamente.
-#
-# - PARSING POR CARPETAS (nuevo esquema) con fallback al formato viejo
-#   Estructura recomendada:  ONESHOT/LOOP → género → general → (subcarpetas) → archivo
-#   Ej.: ONESHOT/trap/drums/kick_X_808 mafia 1_KEY_NO_BPM_NO.wav
-#   • sample_type = carpeta raíz (oneshot/loop)
-#   • genres = [carpeta 1]
-#   • generals = [carpeta 2]
-#   • specifics = subcarpetas extra + prefijo del archivo antes de "_X_"
-#   • title = texto entre "_X_" y "_KEY_/_BPM_" (se quita número final, p.ej. "808 mafia 1" → "808 mafia")
-#   • key/bpm = sufijos "_KEY_*" y "_BPM_*" (NO → vacío/0)
-#
-# - INTERFAZ
-#   • Popover de onda flotante anclado debajo, se oculta al pasar el mouse por encima.
-#   • Entre el botón Drag y Play se muestra carátula/cover art (si existe vía mutagen) o un placeholder (WAV/MP3/FLAC…).
-#   • Clic en cualquier parte de la fila (menos chips/estrella) reproduce/pausa.
-#   • Menús de Key/BPM/Tipo: solo uno abierto a la vez; se cierran al clicar fuera o re-clic en el mismo botón.
-#
-# Requisitos opcionales: `mutagen` para leer carátulas incrustadas. Si no está, se usa placeholder.
+# Cambios clave:
+# - Arreglo de AttributeError: inicializamos _current_row y _ordered_visible_rows ANTES de llamar a _apply_filters() en __init__.
+# - Orden: favoritos (★) siempre primero dentro de los visibles; navegación ↑/↓ usa ese orden.
+# - Reproducción con flechas: hace STOP del actual y reproduce el siguiente/anterior inmediatamente.
+# - Esquema por CARPETAS con compatibilidad del formato viejo.
+# - Menús Key/BPM/Tipo: solo uno abierto; se cierran al clicar fuera o re-clic.
+# - Key "NO" no muestra etiqueta; BPM "NO" treated as 0.
+# - Popover de onda flotante anclado debajo; se oculta al pasar el mouse.
+# - Entre Drag y Play se muestra carátula (si hay) o placeholder con la extensión.
+
 import os, re, sys, json, unicodedata, contextlib, wave
 from pathlib import Path
 from collections import Counter
@@ -950,14 +936,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         cfg = load_config(); self.favorites = set(cfg.get("favorites", []))
 
+        # ordenar y navegar requieren estas dos variables ANTES de _apply_filters()
+        self._current_row = None
+        self._ordered_visible_rows = []     # orden visible actual (para navegación ↑/↓)
+
         self._build_ui()
         self._load_samples()
         self._apply_filters()               # <- al abrir: favoritos primero
         self._refresh_tag_suggestions()
         QtCore.QTimer.singleShot(0, self._refresh_tag_suggestions)
 
-        self._current_row = None
-        self._ordered_visible_rows = []     # orden visible actual (para navegación ↑/↓)
         self.installEventFilter(self)
 
         # popover flotante de reproductor
@@ -1197,7 +1185,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Limpia el layout (sin destruir las filas) y reaplica en el nuevo orden
         while self.listLayout.count():
             item = self.listLayout.takeAt(0)
-            # no eliminamos widgets; simplemente los desprendemos del layout
         for r in rows_in_order:
             self.listLayout.addWidget(r)
         self.listLayout.addStretch(1)
@@ -1249,7 +1236,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Actualiza contador
         self.resLbl.setText(f"{len(visible_rows)} resultado" + ("" if len(visible_rows) == 1 else "s"))
 
-        # Si la fila actual sigue visible, mantenemos su estado; si no, limpiamos
+        # Si la fila actual deja de ser visible, detener y limpiar
         if self._current_row and self._current_row not in visible_rows:
             self._current_row.setPlaying(False)
             self._current_row = None
@@ -1386,8 +1373,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 btn_rect  = self._global_rect(self._active_button) if self._active_button else QtCore.QRect()
                 if not (pop_rect.contains(gp) or btn_rect.contains(gp)):
                     self._close_active_popover()
-            # Si se hace clic en el propio botón que abrió el menú, _toggle_popover ya lo cierra.
-
         return False
 
     def _wrap_resize(self, original_resize_event):
