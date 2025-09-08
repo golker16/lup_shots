@@ -1,11 +1,21 @@
 # app.py
-# - Parsing nuevo: ONESHOT_/LOOP_ + KEY_x + BPM_x
-# - Filtros tipo "Key / BPM / One-Shots & Loops" (estilo menús de la captura)
-# - Los menús: solo 1 abierto a la vez, cierran al hacer clic fuera o re-clic
-# - Filtro de Key en tiempo real: al elegir una nota, por defecto Major (si no se eligió escala)
-# - Popover de onda flotante anclado debajo de la fila, se oculta al pasar el mouse
-# - Navegación ↑/↓ reproduce automáticamente; clic en fila (salvo tags/estrella) también
-# - Botón drag minimal a la izquierda para arrastrar al DAW
+# - Nuevo esquema de METADATA por CARPETAS:
+#     ONESHOT/LOOP  →  género  →  general  →  (subcarpetas opcionales)  →  archivo
+#   Ej.:  ONESHOT/trap/drums/kick_X_808 mafia 1_KEY_NO_BPM_NO.wav
+#   • sample_type = carpeta raíz (oneshot/loop)
+#   • genres = [carpeta 1]
+#   • generals = [carpeta 2]
+#   • specifics = subcarpetas extra  +  prefijo del archivo antes de "_X_"
+#   • title = texto entre "_X_" y "_KEY_/_BPM_" (se le quita número final, p.ej. "808 mafia 1" → "808 mafia")
+#   • key/bpm = sufijos "_KEY_*" y "_BPM_*" (NO → vacío/0)
+#
+# - Compatibilidad con el formato anterior (todo en el nombre).
+# - Menús Key/BPM/Tipo: solo 1 abierto a la vez; se cierran al clicar fuera o re-clic.
+# - Filtrado de Key en tiempo real: al elegir nota, asume Major si no hay escala.
+# - Popover de onda: flotante dentro de la app; se oculta al pasar el mouse.
+# - Navegación ↑/↓ SIEMPRE hace stop del actual y reproduce el siguiente/anterior inmediatamente.
+# - Clic en fila (fuera de chips/estrella) alterna play/pausa.
+# - Botón drag minimal a la izquierda para arrastrar el archivo al DAW.
 import os, re, sys, json, unicodedata, contextlib, wave
 from pathlib import Path
 from collections import Counter
@@ -47,16 +57,97 @@ def strip_accents_lower(s: str) -> str:
     nf = unicodedata.normalize("NFD", s or "")
     return "".join(ch for ch in nf if unicodedata.category(ch) != "Mn").lower()
 
-def parse_from_filename(filename: str):
+def _clean_title_remove_trailing_number(title: str) -> str:
+    # "808 mafia 1" -> "808 mafia" ; "Name - 02" -> "Name"
+    t = re.sub(r"[\s\-]*\d+\s*$", "", title).strip()
+    return t or title
+
+def parse_from_path(path: Path, root: Path):
     """
-    NUEVO FORMATO
-      ONESHOT_GENERO_house_X_drums_X_clap_snare_X_JAUS_KEY_NO_BPM_NO
-      LOOP_GENERO_house_X_drums_X_clap_snare_X_JAUS_KEY_NO_BPM_120
-    Compatibilidad con formato viejo (sin prefijo + sin BPM_).
+    Parsing por CARPETAS (preferido) con fallback al formato anterior.
+    """
+    try:
+        rel = path.relative_to(root)
+    except Exception:
+        rel = path
+
+    parts = list(rel.parts)
+    # parts: [ONESHOT|LOOP, genre, general, (subdirs*), filename]
+    sample_type = ""
+    genres, generals, specifics = [], [], []
+
+    if len(parts) >= 2 and parts[0].upper() in ("ONESHOT", "LOOP"):
+        sample_type = parts[0].lower()
+        if len(parts) >= 2: genres.append(parts[1])
+        if len(parts) >= 3: generals.append(parts[2])
+        if len(parts) > 4:
+            # subcarpetas entre "general" y archivo
+            specifics.extend(list(parts[3:-1]))
+        filename = parts[-1]
+        meta_name = _parse_filename_piecewise(filename)
+    else:
+        # Fallback al formato anterior dentro del nombre
+        filename = parts[-1]
+        meta_name = _parse_legacy_filename(filename)
+
+    # fusionar resultados (para esquema de carpetas también añadimos specifics del nombre)
+    if sample_type:
+        meta_name["sample_type"] = sample_type
+    if genres:
+        meta_name["genres"] = genres
+    if generals:
+        meta_name["generals"] = generals
+    if specifics:
+        meta_name["specifics"] = list(dict.fromkeys(specifics + meta_name.get("specifics", [])))  # unique order
+
+    # limpiar título (quitar número final)
+    meta_name["title"] = _clean_title_remove_trailing_number(meta_name.get("title", ""))
+
+    return meta_name
+
+def _parse_filename_piecewise(filename: str):
+    """
+    filename estilo: <specifics>_X_<TITLE>_KEY_<key>_BPM_<bpm>.<ext>
     """
     base = re.sub(r"\.[^.]+$", "", filename)
 
-    # tipo (oneshot/loop) por prefijo
+    parts = base.split("_X_")
+    pre = parts[0] if parts else ""
+    tail = parts[1] if len(parts) > 1 else ""
+
+    # specifics desde el prefijo (separados por "_")
+    sp_from_name = [t for t in pre.split("_") if t]
+
+    # KEY/BPM
+    mkey = re.search(r"(?:^|_)KEY_([^_]+)", tail, flags=re.I)
+    key = (mkey.group(1).upper() if mkey else "").strip()
+    key = "" if (not key or key == "NO") else key
+
+    mbpm = re.search(r"(?:^|_)BPM_([^_]+)", tail, flags=re.I)
+    bpm = 0
+    if mbpm:
+        bpm_txt = mbpm.group(1).strip()
+        if bpm_txt.upper() != "NO" and bpm_txt.isdigit():
+            bpm = int(bpm_txt)
+
+    # título (hasta KEY/BPM)
+    title = tail
+    title = re.sub(r"_KEY_.*", "", title, flags=re.I)
+    title = re.sub(r"_BPM_.*", "", title, flags=re.I)
+    title = title.replace("_", " ").strip() or base
+
+    return dict(
+        sample_type="", genres=[], generals=[], specifics=sp_from_name,
+        title=title, key=key, bpm=bpm
+    )
+
+def _parse_legacy_filename(filename: str):
+    """
+    Compat anterior:
+    ONESHOT_GENERO_house_X_drums_X_clap_snare_X_JAUS_KEY_NO_BPM_120.wav
+    """
+    base = re.sub(r"\.[^.]+$", "", filename)
+
     sample_type = ""
     if base.upper().startswith("ONESHOT_"):
         sample_type = "oneshot"; base = base[len("ONESHOT_"):]
@@ -65,9 +156,7 @@ def parse_from_filename(filename: str):
 
     parts = base.split("_X_")
 
-    def clean(s):
-        return (s or "").strip()
-
+    def clean(s): return (s or "").strip()
     graw = clean(parts[0] if len(parts) > 0 else "")
     genres = [t for t in re.sub(r"^GENERO_", "", graw, flags=re.I).split("_") if t]
 
@@ -79,12 +168,10 @@ def parse_from_filename(filename: str):
 
     tail = "_X_".join(parts[3:]) if len(parts) > 3 else ""
 
-    # KEY
     mkey = re.search(r"(?:^|_)KEY_([^_]+)", tail, flags=re.I)
     key = (mkey.group(1).upper() if mkey else "").strip()
     key = "" if (not key or key == "NO") else key
 
-    # BPM
     mbpm = re.search(r"(?:^|_)BPM_([^_]+)", tail, flags=re.I)
     bpm = 0
     if mbpm:
@@ -92,15 +179,13 @@ def parse_from_filename(filename: str):
         if bpm_txt.upper() != "NO" and bpm_txt.isdigit():
             bpm = int(bpm_txt)
 
-    # título (antes de KEY/BPM si vienen en el tail)
     title = tail
     title = re.sub(r"_KEY_.*", "", title, flags=re.I)
     title = re.sub(r"_BPM_.*", "", title, flags=re.I)
     title = title.replace("_", " ").strip() or base
 
     return dict(
-        sample_type=sample_type,  # 'oneshot' | 'loop' | ''
-        genres=genres, generals=generals, specifics=specifics,
+        sample_type=sample_type, genres=genres, generals=generals, specifics=specifics,
         title=title, key=key, bpm=bpm
     )
 
@@ -319,7 +404,7 @@ class PlayerPopover(QtWidgets.QFrame):
         self._anchor_widget = None
         self.resize(560, 96)
 
-        # Ocultar al pasar el mouse por encima (aunque sea una esquinita)
+        # Ocultar al pasar el mouse por encima
         self.setMouseTracking(True)
 
     def enterEvent(self, e):
@@ -351,7 +436,6 @@ class PlayerPopover(QtWidgets.QFrame):
     def _reposition(self):
         if not self._anchor_widget:
             return
-        # Posición relativa al main window
         local_pt = self._anchor_widget.mapTo(self._parent_window, QtCore.QPoint(0, self._anchor_widget.height()))
         screen_w = self._parent_window.width()
         desired_w = min(640, max(420, int(screen_w * 0.55)))
@@ -363,8 +447,6 @@ class PlayerPopover(QtWidgets.QFrame):
 
 # ----------------- Filtros (Key / BPM / Tipo) -----------------
 class AnchorPopover(QtWidgets.QFrame):
-    applied = QtCore.Signal()
-
     def __init__(self, parent_window: QtWidgets.QMainWindow):
         super().__init__(parent_window)
         self._parent_window = parent_window
@@ -463,10 +545,7 @@ class KeyFilterPopover(AnchorPopover):
         self._emit_change()
 
     def _collect(self):
-        keys = set()
-        for btn in self._key_buttons:
-            if btn.isChecked():
-                keys.add(btn.text())
+        keys = {btn.text() for btn in self._key_buttons if btn.isChecked()}
         scale = "Major" if self.btnMaj.isChecked() else ("Minor" if self.btnMin.isChecked() else "")
         return keys, scale
 
@@ -475,8 +554,7 @@ class KeyFilterPopover(AnchorPopover):
         self.changed.emit(keys, scale)
 
     def _clear(self):
-        for btn in self._key_buttons:
-            btn.setChecked(False)
+        for btn in self._key_buttons: btn.setChecked(False)
         self.btnMaj.setChecked(False); self.btnMin.setChecked(False)
         self._emit_change()
 
@@ -540,6 +618,8 @@ class BPMFilterPopover(AnchorPopover):
         self.minSpin.blockSignals(True); self.maxSpin.blockSignals(True)
         self.minSpin.setValue(mn); self.maxSpin.setValue(mx)
         self.minSpin.blockSignals(False); self.maxSpin.blockSignals(False)
+        # aplicar en vivo
+        self._apply(live=True)
 
     def _clear(self):
         self.minSpin.setValue(1); self.maxSpin.setValue(300); self.exactSpin.setValue(120)
@@ -723,6 +803,7 @@ class TagRow(QtWidgets.QWidget):
         self.menuBtn = QtWidgets.QToolButton()
         self.menuBtn.setText("…")
         self.menuBtn.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+               # (estilo compacto)
         self.menuBtn.setMinimumWidth(28)
         self.menuBtn.setStyleSheet("background:#232327;color:#e5e7eb;border:1px solid #3a3a44;border-radius:8px;padding:2px 10px;")
         self.menuBtn.clicked.connect(self._open_menu)
@@ -734,7 +815,7 @@ class TagRow(QtWidgets.QWidget):
     def resizeEvent(self, e): self._rebuild(); super().resizeEvent(e)
 
     def _rebuild(self):
-        # limpiar correctamente (esto arregla el bug de "chips" que quedaban)
+        # limpiar correctamente (arregla chips duplicados)
         while self.wrap.count():
             it = self.wrap.takeAt(0)
             w = it.widget()
@@ -818,7 +899,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scroll.horizontalScrollBar().valueChanged.connect(self._reposition_popover)
         self.resizeEvent = self._wrap_resize(self.resizeEvent)
 
-        # popovers de filtros (inicialmente ocultos; no se muestran al arrancar)
+        # popovers de filtros (inicialmente ocultos)
         self.keyPop = KeyFilterPopover(self); self.keyPop.hide(); self.keyPop.changed.connect(self._on_key_filter_changed)
         self.bpmPop = BPMFilterPopover(self); self.bpmPop.hide(); self.bpmPop.changed.connect(self._on_bpm_filter_changed)
         self.typePop = TypeFilterPopover(self); self.typePop.hide(); self.typePop.changed.connect(self._on_type_filter_changed)
@@ -912,6 +993,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- gestor de popovers ----------
     def _toggle_popover(self, popover: AnchorPopover, button: QtWidgets.QToolButton):
+        # re-clic en el mismo botón → cerrar
         if self._active_popover is popover and popover.isVisible():
             popover.hide(); self._active_popover = None; self._active_button = None
         else:
@@ -928,6 +1010,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_popover = None
         self._active_button  = None
 
+    # ---------- helpers para click-fuera ----------
+    def _global_rect(self, w: QtWidgets.QWidget) -> QtCore.QRect:
+        tl = w.mapToGlobal(QtCore.QPoint(0,0))
+        br = w.mapToGlobal(QtCore.QPoint(w.width(), w.height()))
+        return QtCore.QRect(tl, br)
+
     # ---------- carga ----------
     def _collect_files(self):
         files = []
@@ -942,7 +1030,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rows = []
         self.samples = []
         for p in self._collect_files():
-            meta = parse_from_filename(p.name)
+            meta = parse_from_path(p, self.samples_dir)
             peaks, duration, sample_rate, bit_depth = read_pcm_waveform(p)
             duration_ms = int(duration * 1000)
             tags_flat = list(meta["genres"] + meta["generals"] + meta["specifics"])
@@ -1055,11 +1143,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if visible and self.filter_type and s.get("sample_type") != self.filter_type:
                 visible = False
 
-            # key (nota) + escala (opcional)
+            # key
             if visible and self.filter_keys:
                 if not s.get("key") or s["key"] not in self.filter_keys:
                     visible = False
-            # (la escala Major/Minor no se puede verificar del archivo; se usa solo para interfaz/ intención)
 
             # BPM
             bpm = int(s.get("bpm") or 0)
@@ -1111,6 +1198,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.popover._reposition()
 
     def _play_row(self, row: SampleRow):
+        # Cortar inmediatamente cualquier reproducción actual
+        self.player.stop()
         if self._current_row and self._current_row is not row:
             self._current_row.setPlaying(False)
 
@@ -1121,6 +1210,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row.setPlaying(True)
         self._current_row = row
 
+        # Popover
         peaks = row.info.get("peaks")
         duration_ms = row.info.get("duration_ms", 0) or 1
         sr = row.info.get("sample_rate", 0)
@@ -1206,13 +1296,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # Cierre por clic fuera del menú activo
         if ev.type() in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonDblClick):
             if self._active_popover and self._active_popover.isVisible():
-                gp = ev.globalPosition().toPoint()
-                # convertir a coords del main window
-                local = self.mapFromGlobal(gp)
-                if not self._active_popover.geometry().contains(local):
-                    # si no se ha clicado el botón que lo abrió
-                    if not (self._active_button and self._active_button.geometry().contains(self._active_button.mapFromGlobal(gp))):
-                        self._close_active_popover()
+                # punto global del clic
+                if hasattr(ev, "globalPosition"):
+                    gp = ev.globalPosition().toPoint()
+                else:
+                    gp = ev.globalPos()
+                pop_rect = self._global_rect(self._active_popover)
+                btn_rect  = self._global_rect(self._active_button) if self._active_button else QtCore.QRect()
+                if not (pop_rect.contains(gp) or btn_rect.contains(gp)):
+                    self._close_active_popover()
         return False
 
     def _wrap_resize(self, original_resize_event):
@@ -1305,14 +1397,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
