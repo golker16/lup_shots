@@ -532,6 +532,298 @@ class PlayerPopover(QtWidgets.QFrame):
         self.move(x, y)
 
 
+# ----------------- Filtros (Key / BPM / Tipo) - (SE REHABILITADOS) -----------------
+class AnchorPopover(QtWidgets.QFrame):
+    def __init__(self, parent_window: QtWidgets.QMainWindow):
+        super().__init__(parent_window)
+        self._parent_window = parent_window
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.SubWindow)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setObjectName("FilterPopover")
+        self.setStyleSheet("""
+            #FilterPopover > QFrame { background:#18181b; border:1px solid #30303a; border-radius:12px; }
+            QPushButton, QToolButton { background:#232327; color:#e5e7eb; border:1px solid #3a3a44; border-radius:8px; padding:4px 10px; }
+            QPushButton:hover, QToolButton:hover { background:#2a2b31; }
+            QLabel { color:#e5e7eb; }
+            QLineEdit { background:#1a1a1f; border:1px solid #2e2e33; border-radius:8px; padding:4px 8px; color:#e5e7eb; }
+            QTabWidget::pane { border: none; }
+            QTabBar::tab { padding:8px 12px; background:#1a1a1f; color:#e5e7eb; border:1px solid #2e2e33; border-bottom: none; border-top-left-radius:10px; border-top-right-radius:10px; margin-right:6px; }
+            QTabBar::tab:selected { background:#0b2530; border-color:#123043; }
+            QSlider::groove:horizontal { height:6px; background:#2e2e33; border-radius:4px; }
+            QSlider::handle:horizontal { background:#e5e7eb; width:14px; border-radius:7px; margin:-6px 0; }
+        """)
+        self._anchor = None
+
+    def show_for_anchor(self, anchor: QtWidgets.QWidget):
+        self._anchor = anchor
+        self._reposition()
+        self.show()
+        self.raise_()
+
+    def _reposition(self):
+        if not self._anchor:
+            return
+        pt = self._anchor.mapTo(self._parent_window, QtCore.QPoint(0, self._anchor.height()))
+        x = max(8, min(pt.x(), self._parent_window.width() - self.width() - 8))
+        y = pt.y() + 6
+        self.move(x, y)
+
+
+class KeyFilterPopover(AnchorPopover):
+    changed = QtCore.Signal(set, str)  # (keys, scale)
+
+    def __init__(self, parent_window):
+        super().__init__(parent_window)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+        card = QtWidgets.QFrame(self)
+        lay = QtWidgets.QVBoxLayout(card)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(10)
+
+        tabs = QtWidgets.QTabWidget()
+        flats = QtWidgets.QWidget()
+        sharps = QtWidgets.QWidget()
+        tabs.addTab(flats, "Flat keys")
+        tabs.addTab(sharps, "Sharp keys")
+
+        self._key_buttons = []
+
+        def grid_keys(parent, labels):
+            grid = QtWidgets.QGridLayout(parent)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setSpacing(8)
+            row, col = 0, 0
+            for k in labels:
+                btn = QtWidgets.QToolButton()
+                btn.setText(k)
+                btn.setCheckable(True)
+                btn.setMinimumWidth(44)
+                btn.clicked.connect(self._on_key_toggle)
+                self._key_buttons.append(btn)
+                grid.addWidget(btn, row, col)
+                col += 1
+                if col >= 7:
+                    row += 1
+                    col = 0
+
+        grid_keys(flats, ["Db", "Eb", "Gb", "Ab", "Bb", "C", "D", "E", "F", "G", "A", "B"])
+        grid_keys(sharps, ["C#", "D#", "F#", "G#", "A#", "C", "D", "E", "F", "G", "A", "B"])
+        lay.addWidget(tabs)
+
+        scaleRow = QtWidgets.QHBoxLayout()
+        self.btnMaj = QtWidgets.QPushButton("Major")
+        self.btnMin = QtWidgets.QPushButton("Minor")
+        self.btnMaj.setCheckable(True)
+        self.btnMin.setCheckable(True)
+        for b in (self.btnMaj, self.btnMin):
+            b.clicked.connect(self._exclusive_scale_emit)
+        scaleRow.addWidget(self.btnMaj)
+        scaleRow.addWidget(self.btnMin)
+        scaleRow.addStretch(1)
+        lay.addLayout(scaleRow)
+
+        foot = QtWidgets.QHBoxLayout()
+        foot.addWidget(QtWidgets.QLabel('<a href="#">Clear</a>'))
+        foot.itemAt(0).widget().linkActivated.connect(self._clear)
+        foot.addStretch(1)
+        btnClose = QtWidgets.QPushButton("Close")
+        btnClose.clicked.connect(self.hide)
+        foot.addWidget(btnClose)
+        lay.addLayout(foot)
+        outer.addWidget(card)
+        self.resize(360, 240)
+
+    def _on_key_toggle(self):
+        if not (self.btnMaj.isChecked() or self.btnMin.isChecked()):
+            if any(b.isChecked() for b in self._key_buttons):
+                self.btnMaj.setChecked(True)
+        self._emit_change()
+
+    def _exclusive_scale_emit(self):
+        sender = self.sender()
+        if sender is self.btnMaj and self.btnMaj.isChecked():
+            self.btnMin.setChecked(False)
+        elif sender is self.btnMin and self.btnMin.isChecked():
+            self.btnMaj.setChecked(False)
+        self._emit_change()
+
+    def _collect(self):
+        keys = {btn.text() for btn in self._key_buttons if btn.isChecked()}
+        scale = "Major" if self.btnMaj.isChecked() else ("Minor" if self.btnMin.isChecked() else "")
+        return keys, scale
+
+    def _emit_change(self):
+        keys, scale = self._collect()
+        self.changed.emit(keys, scale)
+
+    def _clear(self):
+        for btn in self._key_buttons:
+            btn.setChecked(False)
+        self.btnMaj.setChecked(False)
+        self.btnMin.setChecked(False)
+        self._emit_change()
+
+
+class BPMFilterPopover(AnchorPopover):
+    changed = QtCore.Signal(int, int, int)  # (min, max, exact or 0)
+
+    def __init__(self, parent_window):
+        super().__init__(parent_window)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+        card = QtWidgets.QFrame(self)
+        lay = QtWidgets.QVBoxLayout(card)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(10)
+
+        tabs = QtWidgets.QTabWidget()
+        self.pageRange = QtWidgets.QWidget()
+        self.pageExact = QtWidgets.QWidget()
+        tabs.addTab(self.pageRange, "Range")
+        tabs.addTab(self.pageExact, "Exact")
+
+        rlay = QtWidgets.QVBoxLayout(self.pageRange)
+        row1 = QtWidgets.QHBoxLayout()
+        self.minSpin = QtWidgets.QSpinBox()
+        self.maxSpin = QtWidgets.QSpinBox()
+        self.minSpin.setRange(1, 400)
+        self.maxSpin.setRange(1, 400)
+        self.minSpin.setValue(1)
+        self.maxSpin.setValue(300)
+        self.minSpin.valueChanged.connect(lambda _: self._sync_range(True))
+        self.maxSpin.valueChanged.connect(lambda _: self._sync_range(True))
+        row1.addWidget(QtWidgets.QLabel("Min"))
+        row1.addWidget(self.minSpin)
+        row1.addSpacing(8)
+        row1.addWidget(QtWidgets.QLabel("—"))
+        row1.addSpacing(8)
+        row1.addWidget(QtWidgets.QLabel("Max"))
+        row1.addWidget(self.maxSpin)
+        rlay.addLayout(row1)
+        self.minSlider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.maxSlider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.minSlider.setRange(1, 400)
+        self.maxSlider.setRange(1, 400)
+        self.minSlider.setValue(1)
+        self.maxSlider.setValue(300)
+        self.minSlider.valueChanged.connect(lambda _: self._sync_range(False))
+        self.maxSlider.valueChanged.connect(lambda _: self._sync_range(False))
+        rlay.addWidget(self.minSlider)
+        rlay.addWidget(self.maxSlider)
+
+        exLay = QtWidgets.QHBoxLayout(self.pageExact)
+        self.exactSpin = QtWidgets.QSpinBox()
+        self.exactSpin.setRange(1, 400)
+        self.exactSpin.setValue(120)
+        self.exactSpin.valueChanged.connect(lambda _: self._apply(live=True))
+        exLay.addWidget(QtWidgets.QLabel("BPM"))
+        exLay.addWidget(self.exactSpin)
+        exLay.addStretch(1)
+
+        foot = QtWidgets.QHBoxLayout()
+        clearLbl = QtWidgets.QLabel('<a href="#">Clear</a>')
+        clearLbl.linkActivated.connect(self._clear)
+        foot.addWidget(clearLbl)
+        foot.addStretch(1)
+        btnSave = QtWidgets.QPushButton("Save")
+        btnSave.clicked.connect(self._apply)
+        foot.addWidget(btnSave)
+
+        lay.addWidget(tabs)
+        lay.addLayout(foot)
+        outer.addWidget(card)
+        self.resize(360, 220)
+
+    def _sync_range(self, from_spin: bool):
+        if from_spin:
+            self.minSlider.setValue(self.minSpin.value())
+            self.maxSlider.setValue(self.maxSpin.value())
+        else:
+            self.minSpin.setValue(self.minSlider.value())
+            self.maxSpin.setValue(self.maxSlider.value())
+        mn, mx = sorted((self.minSpin.value(), self.maxSpin.value()))
+        self.minSpin.blockSignals(True)
+        self.maxSpin.blockSignals(True)
+        self.minSpin.setValue(mn)
+        self.maxSpin.setValue(mx)
+        self.minSpin.blockSignals(False)
+        self.maxSpin.blockSignals(False)
+        self._apply(live=True)
+
+    def _clear(self):
+        self.minSpin.setValue(1)
+        self.maxSpin.setValue(300)
+        self.exactSpin.setValue(120)
+        self.changed.emit(1, 300, 0)
+
+    def _apply(self, live: bool = False):
+        if self.findChild(QtWidgets.QTabWidget).currentIndex() == 1:
+            self.changed.emit(0, 0, self.exactSpin.value())
+            if not live:
+                self.hide()
+        else:
+            mn, mx = sorted((self.minSpin.value(), self.maxSpin.value()))
+            self.changed.emit(mn, mx, 0)
+            if not live:
+                self.hide()
+
+
+class TypeFilterPopover(AnchorPopover):
+    changed = QtCore.Signal(str)  # 'loop' | 'oneshot' | ''
+
+    def __init__(self, parent_window):
+        super().__init__(parent_window)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+        card = QtWidgets.QFrame(self)
+        lay = QtWidgets.QVBoxLayout(card)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(10)
+
+        self.grp = QtWidgets.QButtonGroup(self)
+        self.rbLoops = QtWidgets.QRadioButton("Loops")
+        self.rbOnes = QtWidgets.QRadioButton("One-Shots")
+        self.grp.addButton(self.rbLoops)
+        self.grp.addButton(self.rbOnes)
+        self.rbLoops.toggled.connect(lambda _: self._emit_and_close())
+        self.rbOnes.toggled.connect(lambda _: self._emit_and_close())
+
+        lay.addWidget(self.rbLoops)
+        lay.addWidget(self.rbOnes)
+        lay.addSpacing(10)
+        foot = QtWidgets.QHBoxLayout()
+        clearLbl = QtWidgets.QLabel('<a href="#">Clear</a>')
+        clearLbl.linkActivated.connect(self._clear)
+        foot.addWidget(clearLbl)
+        foot.addStretch(1)
+        btnClose = QtWidgets.QPushButton("Close")
+        btnClose.clicked.connect(self.hide)
+        foot.addWidget(btnClose)
+        lay.addLayout(foot)
+
+        outer.addWidget(card)
+        self.resize(280, 160)
+
+    def _clear(self):
+        self.grp.setExclusive(False)
+        self.rbLoops.setChecked(False)
+        self.rbOnes.setChecked(False)
+        self.grp.setExclusive(True)
+        self.changed.emit("")
+
+    def _emit_and_close(self):
+        if self.rbLoops.isChecked():
+            self.changed.emit("loop")
+            self.hide()
+        elif self.rbOnes.isChecked():
+            self.changed.emit("oneshot")
+            self.hide()
+
+
 # ----------------- AUDIO EN HILO DEDICADO -----------------
 class PlayerWorker(QtCore.QObject):
     # señales hacia UI
@@ -1519,4 +1811,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
