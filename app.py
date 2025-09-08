@@ -1,21 +1,28 @@
 # app.py
-# - Nuevo esquema de METADATA por CARPETAS:
-#     ONESHOT/LOOP  →  género  →  general  →  (subcarpetas opcionales)  →  archivo
-#   Ej.:  ONESHOT/trap/drums/kick_X_808 mafia 1_KEY_NO_BPM_NO.wav
+# Cambios en esta versión:
+# - ORDEN Y NAVEGACIÓN
+#   • Los favoritos (★) se ordenan primero SIEMPRE dentro de los resultados visibles.
+#   • La navegación con ↑/↓ usa el nuevo orden visible (no el orden original interno).
+#   • Al cambiar favoritos, el orden y la navegación se actualizan de inmediato.
+#   • Al moverse con ↑/↓ se hace STOP del actual y se reproduce el nuevo inmediatamente.
+#
+# - PARSING POR CARPETAS (nuevo esquema) con fallback al formato viejo
+#   Estructura recomendada:  ONESHOT/LOOP → género → general → (subcarpetas) → archivo
+#   Ej.: ONESHOT/trap/drums/kick_X_808 mafia 1_KEY_NO_BPM_NO.wav
 #   • sample_type = carpeta raíz (oneshot/loop)
 #   • genres = [carpeta 1]
 #   • generals = [carpeta 2]
-#   • specifics = subcarpetas extra  +  prefijo del archivo antes de "_X_"
-#   • title = texto entre "_X_" y "_KEY_/_BPM_" (se le quita número final, p.ej. "808 mafia 1" → "808 mafia")
+#   • specifics = subcarpetas extra + prefijo del archivo antes de "_X_"
+#   • title = texto entre "_X_" y "_KEY_/_BPM_" (se quita número final, p.ej. "808 mafia 1" → "808 mafia")
 #   • key/bpm = sufijos "_KEY_*" y "_BPM_*" (NO → vacío/0)
 #
-# - Compatibilidad con el formato anterior (todo en el nombre).
-# - Menús Key/BPM/Tipo: solo 1 abierto a la vez; se cierran al clicar fuera o re-clic.
-# - Filtrado de Key en tiempo real: al elegir nota, asume Major si no hay escala.
-# - Popover de onda: flotante dentro de la app; se oculta al pasar el mouse.
-# - Navegación ↑/↓ SIEMPRE hace stop del actual y reproduce el siguiente/anterior inmediatamente.
-# - Clic en fila (fuera de chips/estrella) alterna play/pausa.
-# - Botón drag minimal a la izquierda para arrastrar el archivo al DAW.
+# - INTERFAZ
+#   • Popover de onda flotante anclado debajo, se oculta al pasar el mouse por encima.
+#   • Entre el botón Drag y Play se muestra carátula/cover art (si existe vía mutagen) o un placeholder (WAV/MP3/FLAC…).
+#   • Clic en cualquier parte de la fila (menos chips/estrella) reproduce/pausa.
+#   • Menús de Key/BPM/Tipo: solo uno abierto a la vez; se cierran al clicar fuera o re-clic en el mismo botón.
+#
+# Requisitos opcionales: `mutagen` para leer carátulas incrustadas. Si no está, se usa placeholder.
 import os, re, sys, json, unicodedata, contextlib, wave
 from pathlib import Path
 from collections import Counter
@@ -237,6 +244,51 @@ def read_pcm_waveform(path: Path, peaks=160):
     except Exception:
         return None, 0.0, 0, 0
 
+# ---------- Cover art util (opcional con mutagen) ----------
+def load_cover_pixmap(path: Path) -> QtGui.QPixmap | None:
+    """
+    Intenta extraer carátula incrustada usando mutagen (si está instalado).
+    Soporta MP3 (ID3/APIC), FLAC (pictures), WAV con ID3 embebido (raro).
+    """
+    try:
+        from mutagen import File as MutagenFile
+        audio = MutagenFile(str(path))
+        if audio is None:
+            return None
+        data = None
+        # MP3/ID3
+        if hasattr(audio, "tags") and audio.tags:
+            for key in list(audio.tags.keys()):
+                if str(key).startswith("APIC"):
+                    data = audio.tags[key].data
+                    break
+                if str(key).startswith("PIC"):
+                    data = audio.tags[key].data
+                    break
+        # FLAC
+        if data is None and hasattr(audio, "pictures") and audio.pictures:
+            data = audio.pictures[0].data
+        if data:
+            img = QtGui.QImage.fromData(data)
+            if not img.isNull():
+                return QtGui.QPixmap.fromImage(img)
+    except Exception:
+        return None
+    return None
+
+def placeholder_pixmap(ext: str, size: int = 40) -> QtGui.QPixmap:
+    pm = QtGui.QPixmap(size, size)
+    pm.fill(QtGui.QColor("#1f2937"))
+    p = QtGui.QPainter(pm)
+    p.setPen(QtGui.QColor("#e5e7eb"))
+    font = QtGui.QFont()
+    font.setPointSize(8); font.setBold(True)
+    p.setFont(font)
+    text = (ext or "").lstrip(".").upper()[:4] or "AUDIO"
+    p.drawText(pm.rect(), QtCore.Qt.AlignCenter, text)
+    p.end()
+    return pm
+
 # ----------------- UI: chips -----------------
 class TagChip(QtWidgets.QFrame):
     includeRequested = QtCore.Signal(str)
@@ -372,7 +424,8 @@ class PlayerPopover(QtWidgets.QFrame):
         super().__init__(parent_window)
         self._parent_window = parent_window
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.SubWindow)
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        at = QtCore.Qt.WA_TranslucentBackground
+        self.setAttribute(at, True)
         self.setObjectName("PlayerPopover")
 
         shadow = QtWidgets.QGraphicsDropShadowEffect(self)
@@ -691,14 +744,24 @@ class SampleRow(QtWidgets.QFrame):
         self.setObjectName("SampleRow")
         self._apply_style()
 
+        # Drag
         self.btnDrag = DragButton(lambda: self.info["path"])
         self.btnDrag.setFixedWidth(40)
 
+        # Cover art
+        self.cover = QtWidgets.QLabel()
+        self.cover.setFixedSize(40, 40)
+        pm = load_cover_pixmap(info["path"]) or placeholder_pixmap(info["path"].suffix, 40)
+        self.cover.setPixmap(pm.scaled(40, 40, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        self.cover.setToolTip("Carátula/cover art (si existe)")
+
+        # Play
         self.btnPlay = QtWidgets.QPushButton("▶")
         self.btnPlay.setFixedWidth(40)
         self.btnPlay.clicked.connect(lambda: self.playClicked.emit(self))
         self.btnPlay.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
 
+        # Chips (género/general/específicos/key)
         chipsL = QtWidgets.QHBoxLayout(); chipsL.setContentsMargins(0,0,0,0); chipsL.setSpacing(6)
         for g in info["genres"]:
             c = TagChip(g, "blue");   c.includeRequested.connect(self.tagInclude); c.excludeRequested.connect(self.tagExclude); chipsL.addWidget(c)
@@ -712,6 +775,7 @@ class SampleRow(QtWidgets.QFrame):
         chipsW = QtWidgets.QWidget(); chipsW.setStyleSheet("background:transparent;")
         ch = QtWidgets.QHBoxLayout(chipsW); ch.setContentsMargins(0,0,0,0); ch.setSpacing(6); ch.addLayout(chipsL); ch.addStretch(1)
 
+        # Título + metadatos
         self.nameLbl = QtWidgets.QLabel(info["title"]); self.nameLbl.setStyleSheet("color:#e5e7eb;")
         self.nameLbl.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.nameLbl.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
@@ -720,6 +784,7 @@ class SampleRow(QtWidgets.QFrame):
         self.metaLbl = QtWidgets.QLabel(self._meta_text()); self.metaLbl.setStyleSheet("color:#9ca3af;")
         self.metaLbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
 
+        # Estrella
         self.btnStar = QtWidgets.QToolButton()
         self.btnStar.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
         self._sync_star_icon()
@@ -735,10 +800,12 @@ class SampleRow(QtWidgets.QFrame):
         grid = QtWidgets.QGridLayout(self)
         grid.setContentsMargins(10,10,10,10)
         grid.setHorizontalSpacing(10)
+        # Orden: Drag | Cover | Play | resto
         grid.addWidget(self.btnDrag, 0, 0)
-        grid.addWidget(self.btnPlay, 0, 1)
-        grid.addWidget(leftW, 0, 2)
-        grid.setColumnStretch(2, 1)
+        grid.addWidget(self.cover,   0, 1)
+        grid.addWidget(self.btnPlay, 0, 2)
+        grid.addWidget(leftW,        0, 3)
+        grid.setColumnStretch(3, 1)
 
         self.setMouseTracking(True)
 
@@ -803,7 +870,6 @@ class TagRow(QtWidgets.QWidget):
         self.menuBtn = QtWidgets.QToolButton()
         self.menuBtn.setText("…")
         self.menuBtn.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-               # (estilo compacto)
         self.menuBtn.setMinimumWidth(28)
         self.menuBtn.setStyleSheet("background:#232327;color:#e5e7eb;border:1px solid #3a3a44;border-radius:8px;padding:2px 10px;")
         self.menuBtn.clicked.connect(self._open_menu)
@@ -815,7 +881,7 @@ class TagRow(QtWidgets.QWidget):
     def resizeEvent(self, e): self._rebuild(); super().resizeEvent(e)
 
     def _rebuild(self):
-        # limpiar correctamente (arregla chips duplicados)
+        # limpiar correctamente (evita chips duplicados)
         while self.wrap.count():
             it = self.wrap.takeAt(0)
             w = it.widget()
@@ -886,11 +952,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._build_ui()
         self._load_samples()
-        self._apply_filters()
+        self._apply_filters()               # <- al abrir: favoritos primero
         self._refresh_tag_suggestions()
         QtCore.QTimer.singleShot(0, self._refresh_tag_suggestions)
 
         self._current_row = None
+        self._ordered_visible_rows = []     # orden visible actual (para navegación ↑/↓)
         self.installEventFilter(self)
 
         # popover flotante de reproductor
@@ -1064,6 +1131,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if row.isFav: self.favorites.add(name)
         else: self.favorites.discard(name)
         cfg = load_config(); cfg["favorites"] = sorted(self.favorites); save_config(cfg)
+        # Reordenar inmediatamente manteniendo la fila actual
         self._apply_filters()
 
     # ---------- filtros (texto/tags) ----------
@@ -1124,9 +1192,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btnType.setText(f"{label} ▾")
         self._apply_filters()
 
-    # ---------- aplicación de filtros y tags sugeridos ----------
+    # ---------- aplicación de filtros y orden ----------
+    def _set_list_order(self, rows_in_order):
+        # Limpia el layout (sin destruir las filas) y reaplica en el nuevo orden
+        while self.listLayout.count():
+            item = self.listLayout.takeAt(0)
+            # no eliminamos widgets; simplemente los desprendemos del layout
+        for r in rows_in_order:
+            self.listLayout.addWidget(r)
+        self.listLayout.addStretch(1)
+
     def _apply_filters(self):
-        visible_count = 0
+        visible_rows = []
         for i, row in enumerate(self.rows):
             s = self.samples[i]
             visible = True
@@ -1158,22 +1235,26 @@ class MainWindow(QtWidgets.QMainWindow):
                     visible = False
 
             row.setVisible(visible)
-            if visible: visible_count += 1
+            if visible: visible_rows.append(row)
 
-        # orden -> favoritos primero entre visibles, luego alfabético por título
-        visible_rows = [r for r in self.rows if r.isVisible()]
-        hidden_rows  = [r for r in self.rows if not r.isVisible()]
+        # ORDEN: favoritos primero, luego alfabético por título
         visible_rows.sort(key=lambda r: (0 if r.info["filename"] in self.favorites else 1,
                                          strip_accents_lower(r.info["title"])))
-        # reinsertar en layout
-        for i in reversed(range(self.listLayout.count())):
-            it = self.listLayout.takeAt(i)
-            if it and it.widget(): self.listLayout.removeItem(it)
-        for r in visible_rows + hidden_rows:
-            self.listLayout.addWidget(r)
-        self.listLayout.addStretch(1)
+        hidden_rows = [r for r in self.rows if r not in visible_rows]
 
-        self.resLbl.setText(f"{visible_count} resultado" + ("" if visible_count == 1 else "s"))
+        # Actualizamos el orden en el layout y el orden de navegación
+        self._set_list_order(visible_rows + hidden_rows)
+        self._ordered_visible_rows = visible_rows
+
+        # Actualiza contador
+        self.resLbl.setText(f"{len(visible_rows)} resultado" + ("" if len(visible_rows) == 1 else "s"))
+
+        # Si la fila actual sigue visible, mantenemos su estado; si no, limpiamos
+        if self._current_row and self._current_row not in visible_rows:
+            self._current_row.setPlaying(False)
+            self._current_row = None
+            self.player.stop()
+            self.popover.hide()
 
     def _refresh_tag_suggestions(self):
         freq = Counter()
@@ -1234,14 +1315,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._play_row(row)
 
     def _move_selection(self, delta: int):
-        visible_rows = [r for r in self.rows if r.isVisible()]
-        if not visible_rows: return
-        if self._current_row is None or self._current_row not in visible_rows:
-            target = visible_rows[0] if delta >= 0 else visible_rows[-1]
+        rows = self._ordered_visible_rows or [r for r in self.rows if r.isVisible()]
+        if not rows: return
+        if self._current_row is None or self._current_row not in rows:
+            target = rows[0] if delta >= 0 else rows[-1]
         else:
-            idx = visible_rows.index(self._current_row)
-            idx = max(0, min(len(visible_rows)-1, idx + delta))
-            target = visible_rows[idx]
+            idx = rows.index(self._current_row)
+            idx = max(0, min(len(rows)-1, idx + delta))
+            target = rows[idx]
         self._play_row(target)
 
     def _on_state(self, st):
@@ -1275,16 +1356,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if key in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return):
                 if not is_text:
-                    vis = [r for r in self.rows if r.isVisible()]
-                    target = self._current_row or (vis[0] if vis else None)
+                    rows = self._ordered_visible_rows or [r for r in self.rows if r.isVisible()]
+                    target = self._current_row or (rows[0] if rows else None)
                     if target: self._toggle_play_row(target)
                     return True
                 return False
             if key == QtCore.Qt.Key_Space:
                 if not is_text:
-                    vis = [r for r in self.rows if r.isVisible()]
-                    if self._current_row is None and vis:
-                        self._play_row(vis[0])
+                    rows = self._ordered_visible_rows or [r for r in self.rows if r.isVisible()]
+                    if self._current_row is None and rows:
+                        self._play_row(rows[0])
                     elif self._current_row:
                         self._toggle_play_row(self._current_row)
                     return True
@@ -1305,6 +1386,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 btn_rect  = self._global_rect(self._active_button) if self._active_button else QtCore.QRect()
                 if not (pop_rect.contains(gp) or btn_rect.contains(gp)):
                     self._close_active_popover()
+            # Si se hace clic en el propio botón que abrió el menú, _toggle_popover ya lo cierra.
+
         return False
 
     def _wrap_resize(self, original_resize_event):
