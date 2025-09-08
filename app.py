@@ -1,13 +1,15 @@
 # app.py
-# Cambios clave:
-# - Arreglo de AttributeError: inicializamos _current_row y _ordered_visible_rows ANTES de llamar a _apply_filters() en __init__.
-# - Orden: favoritos (★) siempre primero dentro de los visibles; navegación ↑/↓ usa ese orden.
-# - Reproducción con flechas: hace STOP del actual y reproduce el siguiente/anterior inmediatamente.
-# - Esquema por CARPETAS con compatibilidad del formato viejo.
-# - Menús Key/BPM/Tipo: solo uno abierto; se cierran al clicar fuera o re-clic.
-# - Key "NO" no muestra etiqueta; BPM "NO" treated as 0.
-# - Popover de onda flotante anclado debajo; se oculta al pasar el mouse.
-# - Entre Drag y Play se muestra carátula (si hay) o placeholder con la extensión.
+# Cambios en esta versión:
+# - FIX cuelgues al cambiar de sample mientras suena:
+#   • Cambio de fuente de audio asincrónico y seguro (stop → unload → setSource/play dentro de singleShot).
+#   • Interrupción inmediata al navegar con ↑/↓ o al hacer clic en otra fila.
+#   • Al pasar de sample, el reproductor nunca bloquea el hilo UI.
+# - Orden de controles en cada fila: Drag & Drop → Play → Cover Art → info.
+# - Popover de onda flotante (no ocupa layout; se oculta al pasar el mouse).
+# - Esquema por CARPETAS con fallback al formato viejo en el nombre.
+# - Key "NO" no muestra etiqueta; BPM "NO" → 0.
+# - Filtros Key/BPM/Tipo con menús exclusivos (solo uno abierto), cierre al clicar fuera o re-clic.
+# - Favoritos primero SIEMPRE dentro del conjunto visible; navegación usa ese orden.
 
 import os, re, sys, json, unicodedata, contextlib, wave
 from pathlib import Path
@@ -734,18 +736,18 @@ class SampleRow(QtWidgets.QFrame):
         self.btnDrag = DragButton(lambda: self.info["path"])
         self.btnDrag.setFixedWidth(40)
 
+        # Play
+        self.btnPlay = QtWidgets.QPushButton("▶")
+        self.btnPlay.setFixedWidth(40)
+        self.btnPlay.clicked.connect(lambda: self.playClicked.emit(self))
+        self.btnPlay.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+
         # Cover art
         self.cover = QtWidgets.QLabel()
         self.cover.setFixedSize(40, 40)
         pm = load_cover_pixmap(info["path"]) or placeholder_pixmap(info["path"].suffix, 40)
         self.cover.setPixmap(pm.scaled(40, 40, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
         self.cover.setToolTip("Carátula/cover art (si existe)")
-
-        # Play
-        self.btnPlay = QtWidgets.QPushButton("▶")
-        self.btnPlay.setFixedWidth(40)
-        self.btnPlay.clicked.connect(lambda: self.playClicked.emit(self))
-        self.btnPlay.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
 
         # Chips (género/general/específicos/key)
         chipsL = QtWidgets.QHBoxLayout(); chipsL.setContentsMargins(0,0,0,0); chipsL.setSpacing(6)
@@ -786,10 +788,10 @@ class SampleRow(QtWidgets.QFrame):
         grid = QtWidgets.QGridLayout(self)
         grid.setContentsMargins(10,10,10,10)
         grid.setHorizontalSpacing(10)
-        # Orden: Drag | Cover | Play | resto
+        # Orden: Drag | Play | Cover | resto   (según lo solicitado)
         grid.addWidget(self.btnDrag, 0, 0)
-        grid.addWidget(self.cover,   0, 1)
-        grid.addWidget(self.btnPlay, 0, 2)
+        grid.addWidget(self.btnPlay, 0, 1)
+        grid.addWidget(self.cover,   0, 2)
         grid.addWidget(leftW,        0, 3)
         grid.setColumnStretch(3, 1)
 
@@ -920,6 +922,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.player.mediaStatusChanged.connect(self._on_status)
         self.player.playbackStateChanged.connect(self._on_state)
         self.player.positionChanged.connect(self._on_position)
+        # token de conmutación para evitar colisiones y cuelgues
+        self._switch_seq = 0
 
         # filtros de búsqueda
         self.filter_keys = set()
@@ -1241,6 +1245,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_row.setPlaying(False)
             self._current_row = None
             self.player.stop()
+            self.player.setSource(QtCore.QUrl())  # descarga segura
             self.popover.hide()
 
     def _refresh_tag_suggestions(self):
@@ -1266,19 +1271,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.popover._reposition()
 
     def _play_row(self, row: SampleRow):
-        # Cortar inmediatamente cualquier reproducción actual
-        self.player.stop()
+        """
+        Cambio de sample robusto:
+        - Incrementa secuencia para invalidar cargas antiguas.
+        - Detiene y descarga la fuente actual.
+        - Usa singleShot(0) para setSource/play asincrónico y evitar bloqueos.
+        """
+        self._switch_seq += 1
+        seq = self._switch_seq
+        url = QtCore.QUrl.fromLocalFile(str(row.info["path"]))
+
+        # UI: desactivar anterior
         if self._current_row and self._current_row is not row:
             self._current_row.setPlaying(False)
-
-        url = QtCore.QUrl.fromLocalFile(str(row.info["path"]))
-        self.player.setSource(url)
-        self.player.setPosition(0)
-        self.player.play()
-        row.setPlaying(True)
         self._current_row = row
 
-        # Popover
+        # Popover e info (antes de cargar para que se sienta instantáneo)
         peaks = row.info.get("peaks")
         duration_ms = row.info.get("duration_ms", 0) or 1
         sr = row.info.get("sample_rate", 0)
@@ -1286,8 +1294,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self.popover.setInfo(peaks, sr, bd, duration_ms)
         self.popover.setProgressMs(0)
         self.popover.show_for_anchor(row.anchor_widget())
-
         self._ensure_visible(row)
+
+        # Detener y descargar inmediatamente sin bloquear
+        try:
+            self.player.stop()
+            self.player.setSource(QtCore.QUrl())  # descarga para liberar el archivo
+        except Exception:
+            pass
+
+        def do_load():
+            if seq != self._switch_seq:
+                return
+            try:
+                self.player.setSource(url)
+                self.player.setPosition(0)
+                self.player.play()
+                row.setPlaying(True)
+            except Exception:
+                # En caso extremo de error, reintentar con reinicio del QMediaPlayer
+                try:
+                    self.player.deleteLater()
+                except Exception:
+                    pass
+                self.player = QtMultimedia.QMediaPlayer()
+                self.player.setAudioOutput(self.audio_out)
+                self.player.mediaStatusChanged.connect(self._on_status)
+                self.player.playbackStateChanged.connect(self._on_state)
+                self.player.positionChanged.connect(self._on_position)
+                self.player.setSource(url)
+                self.player.play()
+                row.setPlaying(True)
+
+        # Ejecutar en el próximo ciclo del event loop
+        QtCore.QTimer.singleShot(0, do_load)
 
     def _toggle_play_row(self, row: SampleRow):
         if self._current_row is row:
@@ -1398,6 +1438,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_tag_suggestions()
             if not (self._current_row and self._current_row.isVisible()):
                 self._current_row = None
+                self.player.stop()
+                self.player.setSource(QtCore.QUrl())
                 self.popover.hide()
 
 # ----------------- bienvenida -----------------
